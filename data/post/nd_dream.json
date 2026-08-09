@@ -1,0 +1,9 @@
+{
+  "name": "nd_dream",
+  "passes": [
+    { "name": "bloom",     "threshold": 0.7, "intensity": 1.1 },
+    { "name": "vignette",  "amount": 0.4, "curve": 1.8 },
+    { "name": "grade",     "tonemap": true, "saturation": 0.95, "contrast": 1.0, "exposure": 0.98 },
+    { "name": "fxaa" }
+  ]
+}

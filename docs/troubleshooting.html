@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Troubleshooting — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">⚠</span> Overview · Troubleshooting</p>
+        <h1>Troubleshooting</h1>
+        <p class="lede">Everything fails loudly, by design — the engine logs the subsystem, the file and often the exact line to stderr. Here's how to read those logs and fix the common failure modes.</p>
+      </header>
+
+      <section>
+        <h2>Reading the logs</h2>
+        <p class="sec-sub">All diagnostics go to <strong>stderr</strong> in a <code>[TAG] message</code> format. The tag names the subsystem:</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Tag</th><th>Subsystem</th><th>Typical messages</th></tr></thead>
+            <tbody>
+              <tr><td><code>[MAIN]</code></td><td>Shell / window / track</td><td>Window creation, track fallback, app init failures</td></tr>
+              <tr><td><code>[PATHS]</code></td><td>Runtime directory resolution</td><td>Which dir a resource root resolved to, and why</td></tr>
+              <tr><td><code>[SHADER]</code></td><td>Shader manager</td><td>Compile errors, hot-reload results, include-depth warnings</td></tr>
+              <tr><td><code>[FX]</code></td><td>Effect registry / plugins</td><td>Registered effect count, plugin load failures</td></tr>
+              <tr><td><code>[AUDIO]</code></td><td>Audio engine</td><td>Track decode, analyser, silent no-track mode</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout tip">
+          <span class="ct-label">Tip</span>
+          <p>Run from a terminal — <code>./ns_demo.exe 2>&amp;1 | tee show.log</code> — so the log is on disk for post-mortems. The shipped data files parse cleanly, so if your edits break a load, the log names the file.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Quick index</h2>
+        <p class="sec-sub">Symptom → likely cause → where to look:</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+            <tbody>
+              <tr><td>Shader shows as black / effect won't show</td><td>GLSL compile error</td><td>See <a href="#shader-errors">shader compile errors</a></td></tr>
+              <tr><td>DemoApp init fails with <code>undefined variable "Null"</code> on <code>lit.vert</code></td><td>Shader <code>#include</code> silently dropped (include path failed to resolve)</td><td>See <a href="#include-null">include resolution</a></td></tr>
+              <tr><td>Fixed a shader but it never hot-reloads — no <code>hot-reloaded</code> line appears after saving</td><td>Program skipped forever after one failed compile (old <code>st->ok</code> gate)</td><td>See <a href="#hotreload-gate">hot-reload gate</a></td></tr>
+              <tr><td>Shadertoy effect fails with <code>invalid string position</code> or an <code>unexpected "=="</code> cascade naming a garbage pass</td><td>Old pass parser misfired on prose that mentions <code>// pass:</code> — a current build cannot produce this log</td><td>See <a href="#shadertoy-markers">shadertoy pass markers</a> (stale-binary check)</td></tr>
+              <tr><td>Multi-pass Shadertoy shows as a solid colour / black (single-pass files fine)</td><td>Image pass drew into the last buffer instead of the scene target + sampled it (feedback)</td><td>See <a href="#shadertoy-solid">solid-colour image pass</a></td></tr>
+              <tr><td>The show is silent (no music)</td><td>No track file found / <code>--no-track</code></td><td>See <a href="#track-fallback">silent no-track mode</a></td></tr>
+              <tr><td>CMake fails at configure on GLFW</td><td>GitHub fetch unreachable</td><td>See <a href="#glfw-fetch">GLFW fetch</a></td></tr>
+              <tr><td>Plugin effects missing at runtime</td><td>Load failed / wrong entry point</td><td>See <a href="#plugin-load">plugin load</a></td></tr>
+              <tr><td>Shader/texture loads fail on another machine</td><td>Baked build paths broken</td><td>See <a href="#path-resolution">path overrides</a></td></tr>
+              <tr><td>Nothing renders, screens show "SIGNAL LOST"</td><td>Shader dir unresolvable</td><td>See <a href="#path-resolution">path overrides</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="shader-errors">
+        <h2>Shader compile errors</h2>
+        <p class="sec-sub">Compilation is strict and descriptive. A failed stage throws a <code>std::runtime_error</code> carrying the GLSL info log — including the offending line number — and the shader manager records it on the program state.</p>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">stderr</span><span class="lang">log</span></div>
+          <pre>[SHADER] hot-reload failed for 'scene.frag' - keeping previous version:
+compile error (scene.frag):
+0(12) : error C1008: undefined variable "uTime"</pre>
+        </div>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Issue</th><th>Behavior &amp; fix</th></tr></thead>
+            <tbody>
+              <tr><td>Syntax / type error</td><td>The log names the stage, file and line. Fix the <code>.frag</code>/<code>.vert</code> and save — hot reload recompiles.</td></tr>
+              <tr><td>Undefined uniform</td><td>Not an error. Reflection skips unknown uniforms, so a typo'd name silently does nothing. Check <code>u*</code> spellings against the shader.</td></tr>
+              <tr><td><code>#version 300 es</code></td><td>Rewritten to <code>#version 330 core</code> automatically. Don't add your own version line after the first.</td></tr>
+              <tr><td><code>precision highp float;</code></td><td>Stripped automatically (desktop GLSL has no precision qualifiers).</td></tr>
+              <tr><td>Missing <code>#include</code></td><td>Recorded as a missing dependency and the load fails — the log lists the include path. Files resolve relative to the shader dir.</td></tr>
+              <tr><td>Include cycle</td><td><code>[SHADER] include depth exceeded at &lt;file&gt; (cycle?)</code> after 16 levels.</td></tr>
+              <tr><td>Hot reload keeps old version</td><td>Intentional: a failed recompile keeps the previous working program live so the show never goes black mid-scene.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div id="include-null">
+          <h3>“undefined variable "Null"” — the include that silently vanished</h3>
+          <p class="sec-sub">The shared <code>NullBlock</code> UBO lives in <code>shaders/common.glsl</code> and is injected into every shader via <code>#include &lt;common&gt;</code>. If that include fails to resolve, the shader compiles without the UBO and every <code>Null.u*</code> read dies — a cryptic GLSL error that never names the real problem:</p>
+          <div class="code" data-lang="bash">
+            <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">stderr</span><span class="lang">log</span></div>
+            <pre>[MAIN] DemoApp init failed: shader compile failed (lit.vert + lit.frag):
+compile error (lit.vert):
+0(25) : error C1503: undefined variable "Null"</pre>
+          </div>
+          <p class="sec-sub" style="margin-top:16px">The historical cause: the app's shader manager built include paths without an extension, so <code>#include &lt;common&gt;</code> opened <code>shaders/common</code> (no <code>.glsl</code>) and silently vanished. Two things now make this impossible to miss:</p>
+          <ul>
+            <li><strong>Include resolution</strong> tries the literal name first, then appends <code>.glsl</code> — and any unresolvable file or include fails loudly with <code>shader file not found: &lt;path&gt; (…, searched &lt;dir&gt;[, missing include])</code> instead of compiling an empty source.</li>
+            <li><strong>The preflight catches it</strong> — <code>--check-shaders</code> also compiles the app's forward-lit <code>lit.vert + lit.frag</code> program, so a regression like this exits <code>1</code> at dev time instead of mid-show.</li>
+          </ul>
+          <div class="code" data-lang="bash">
+            <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">terminal</span><span class="lang">bash</span></div>
+            <pre># healthy: engine stages + the app lit program all compile
+[SHADER] engine preflight: 68/68 stages ok
+[SHADER] app preflight: lit.vert + lit.frag ok
+
+# regression (common.glsl missing): exit code 1, the file is named
+[SHADER] app preflight failed: shader compile failed (lit.vert + lit.frag):
+shader file not found: …/shaders/common.glsl (vert 'lit.vert', searched …/shaders, missing include)</pre>
+          </div>
+          <div class="callout tip">
+            <span class="ct-label">Fix</span>
+            <p>Make sure <code>common.glsl</code> sits in the resolved shader dir (wherever <code>NULLSECTOR_SHADER_DIR</code> points — see <a href="#path-resolution">path overrides</a>), and that the include uses the exact name. Both <code>#include &lt;file&gt;</code> and <code>#include "file.glsl"</code> forms are supported; explicit extensions work too.</p>
+          </div>
+        </div>
+
+        <div id="hotreload-gate">
+          <h3>“I fixed my shader but it never hot-reloads” — the dead reload gate</h3>
+          <p class="sec-sub">You break a shader and save; the log warns. You fix it and save again — and nothing: no <code>hot-reloaded</code> line, ever, until you restart the app. The show never goes dark (it keeps the previous program) but your fix silently never applies.</p>
+          <p class="sec-sub" style="margin-top:16px">The historical cause: <code>pollHotReload()</code> gated every program on an <code>st-&gt;ok</code> flag, and a failed recompile set it to <code>false</code>. One compile error therefore <em>permanently</em> disabled hot reload for that program — fixing the file changed nothing because the gate skipped it forever. Three behaviors surround this, and the log proves each:</p>
+          <ul>
+            <li><strong>“Keeping previous version” is intended, not the bug</strong> — <code>compileProgram()</code> only swaps the GL program on success, so a failed recompile leaves the previous working program bound and the show renders on. The <code>[SHADER] hot-reload failed … - keeping previous version:</code> warn is the proof.</li>
+            <li><strong>Retry on the next change</strong> — the gate is gone; the fix re-runs whenever the file changes. On failure the program is marked permanently dirty (<code>mtime = min</code>), so even a timestamp-preserving restore (<code>cp -p</code>, <code>git checkout</code>, archive extraction) is retried.</li>
+            <li><strong>1-second retry throttle</strong> — a <em>deleted</em> shader file would otherwise fail + warn every poll (~60/s), because the dirty check short-circuits on the missing file before comparing mtimes. Attempts are capped at one per second.</li>
+          </ul>
+          <div class="code" data-lang="bash">
+            <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">stderr</span><span class="lang">log</span></div>
+            <pre># 1. you BREAK lit.frag mid-show - previous program stays live (never dark)
+[WRN][SHADER] hot-reload failed for 'lit.vert + lit.frag' - keeping previous version:
+compile error (lit.frag):
+0(309) : error C0000: syntax error, unexpected identifier, expecting ',' or ';' at token "BADTOKEN"
+
+# 2. you FIX lit.frag - the retry fires and swaps the program
+[INF][SHADER] hot-reloaded 'lit.vert + lit.frag'
+[INF][RELOAD] recompiled 1 shader program(s)
+
+# 3. DELETED instead of edited: exactly ~1 warn/second (the throttle), not per-frame
+[WRN][SHADER] hot-reload failed for 'lit.vert + lit.frag' - keeping previous version:
+shader file not found: …/shaders/lit.frag (frag 'lit.frag', searched …/shaders)
+
+# 4. file RESTORED: it comes back live
+[INF][SHADER] hot-reloaded 'lit.vert + lit.frag'</pre>
+          </div>
+          <div class="callout tip">
+            <span class="ct-label">Fix</span>
+            <p>If a <code>hot-reload failed</code> warn is followed by <em>no</em> <code>hot-reloaded</code> line after you save the corrected file, run <code>./ns_demo.exe --check-shaders</code> to confirm the file compiles standalone, and verify it actually sits in the resolved shader dir (see <a href="#path-resolution">path overrides</a>). Current builds retry automatically — a missing retry means the manager isn't looking where your file is.</p>
+          </div>
+        </div>
+
+        <div id="shadertoy-markers">
+          <h3>Shadertoy imports fail: “invalid string position” / “unexpected “==”” cascades</h3>
+          <p class="sec-sub">A Shadertoy file that should compile can fail in two cryptic ways — both from the pass-splitting step, not your GLSL:</p>
+          <div class="code" data-lang="bash">
+            <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">stderr</span><span class="lang">log</span></div>
+            <pre># single-pass file whose header MENTIONS the marker text:
+[ERR][SHADERTOY] pass '` markers = image pass).' failed:
+0(21) : error C0000: syntax error, unexpected "==" at token "=="
+0(33) : error C1503: undefined variable "p"
+... (cascade: hash21 / fragCoord / fbm all "undefined")
+
+# multi-pass file: the split arithmetic throws instead
+[ERR][FX] effect 'shadertoy:tunnel_warp.glsl' init failed: invalid string position</pre>
+          </div>
+          <p class="sec-sub" style="margin-top:16px">Both symptoms are one bug in the pass parser. The marker scan matched <code>// pass:</code> <em>anywhere</em>, so a header comment like <code>(no `// pass:` markers = image pass)</code> or a nested <code>//   // pass: common - description</code> became a false marker. Then the line-end arithmetic (<code>markerPos + file.find('\n', markerPos)</code> — adding an absolute offset to itself) truncated single-pass sources mid-comment — the bare <code>====</code> line is the <code>unexpected "=="</code> — and threw <code>std::out_of_range</code> (“invalid string position”) when the bogus start point landed past the next marker on multi-pass files. A third, separate bug dropped the <code>common</code> pass entirely and re-ordered passes by moving out of the container mid-iteration, leaving phantom empty passes (<code>pass '' failed: … no program defined</code>). All three are fixed; the rules are now:</p>
+          <ul>
+            <li><strong>A marker is a line whose first comment is <code>pass:</code></strong>, with only whitespace before it, and the name is a single token — prose mentions and nested comments never split a file (see the <a href="shadertoy.html#multi-pass">Shadertoy page</a>).</li>
+            <li><strong>The <code>common</code> pass is prepended to every other pass</strong>, so shared helpers (<code>hash21</code>, <code>warp</code>, …) are in scope for buffer and image passes.</li>
+            <li><strong>Pass re-ordering copies</strong> instead of moving out of the container, so no phantom empty passes remain.</li>
+          </ul>
+          <div class="callout tip">
+            <span class="ct-label">Fix</span>
+            <p>Make sure marker lines are standalone (<code>// pass: image</code> alone on its line) and that your file's header doesn't literally echo the marker text. The shipped <code>plasma.glsl</code> and <code>tunnel_warp.glsl</code> split into <code>1</code> and <code>3</code> passes respectively — <code>ns_fw_tests</code> verifies the split GL-free, so a future parser regression fails there before it reaches a show.</p>
+          </div>
+
+          <p class="sec-sub" style="margin-top:16px"><strong>This exact log also identifies a stale binary.</strong> The two signatures above — <code>pass '` markers = image pass).'</code> and <code>init failed: invalid string position</code> — are the <em>old</em> parser's fingerprints, and no build newer than the fix can produce them: the strict rule rejects prose mentions outright, and the splitter's line-end arithmetic no longer throws. If they appear after a rebuild, the running exe is pre-fix — an old <code>ns_demo.exe</code> shadowing the new one on <code>PATH</code> or in the working directory, a different copy launched from a file manager, or a stale build output. Prove the build in two seconds:</p>
+          <div class="code" data-lang="bash">
+            <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">terminal</span><span class="lang">bash</span></div>
+            <pre># a CURRENT binary compiles every data/shadertoy file and exits 0:
+./ns_demo.exe --check-shadertoy
+[INF][SHADERTOY-CHECK] ok: plasma.glsl compiles + links
+[INF][SHADERTOY-CHECK] ok: tunnel_warp.glsl compiles + links
+[SHADERTOY] preflight: 7/7 checks ok          # RC 0 - parser is current, look elsewhere
+
+# ... while the OLD binary repeats the mystery log even on the same files:
+[ERR][SHADERTOY] pass '` markers = image pass).' failed:
+[ERR][FX] effect 'shadertoy:tunnel_warp.glsl' init failed: invalid string position</pre>
+          </div>
+          <div class="callout warn">
+            <span class="ct-label">Stale binary?</span>
+            <p>Before debugging your GLSL, run <code>./ns_demo.exe --check-shadertoy</code>. RC 0 with <code>preflight: 7/7 checks ok</code> means the parser in the running binary is current — the error is in your data, the log names the file, or the log is simply from an old run. If the check itself reproduces the failure, that's a code regression worth reporting — it can't silently reach a show.</p>
+          </div>
+        </div>
+
+        <div id="shadertoy-solid">
+          <h3>Multi-pass Shadertoy shows a solid colour / black (single-pass files fine)</h3>
+          <p class="sec-sub">A multi-pass shadertoy (e.g. <code>tunnel_warp.glsl</code>, which has <code>// pass: buffer_a</code> + <code>// pass: image</code>) can compile cleanly yet render as one flat colour — while single-pass files (<code>plasma.glsl</code>) are fine. The importer's buffer loop binds its own RGBA16F targets, and the <em>image pass</em> then drew into whatever framebuffer was still bound — the last buffer — instead of the caller's scene target, and it sampled that same buffer (and the scene) while doing so. Sampling a texture that is attached to the very framebuffer you are drawing into is undefined behaviour; on most drivers it collapses to a solid colour or black, and the composite never reached the screen.</p>
+          <p class="sec-sub" style="margin-top:16px">The fix has two halves:</p>
+          <ul>
+            <li><strong>The scene is snapshotted once up front</strong> — the live scene (<code>ctx.hdr</code>) is copied into an internal target before any pass runs, and <code>iChannel1</code> (the “live scene” input) plus buffer A's fallback sample that copy. Nothing ever samples the target being written.</li>
+            <li><strong>The image pass rebinds the caller's scene target</strong> before drawing, so the final composite lands where the post pipeline reads it — not in the last buffer.</li>
+          </ul>
+          <div class="callout tip">
+            <span class="ct-label">Fix</span>
+            <p>This class of bug is now caught before the show: <code>./ns_demo.exe --check-shadertoy</code> renders every <code>data/shadertoy/*.glsl</code> offscreen and verifies the frame both <em>reaches the scene target</em> (not stuck at the clear colour) and <em>has spatial variance</em> (not a feedback-loop solid). A regression in the pass pipeline fails there with the offending file named, instead of mid-scene.</p>
+          </div>
+        </div>
+
+        <div class="callout note">
+          <span class="ct-label">Validate</span>
+          <p><code>./ns_demo.exe --check-shaders</code> compiles every engine shader stage <em>plus</em> the app's forward-lit <code>lit</code> program and exits — use it in CI to catch shader regressions before they reach a show. Data-referenced shaders compile when their effect first shows.</p>
+        </div>
+      </section>
+
+      <section id="track-fallback">
+        <h2>Missing track → silent show</h2>
+        <p class="sec-sub">There is no built-in synthesizer anymore — the engine only plays real WAV/MP3 files. If it can't find a track the show runs <em>silently</em>: the audio device stays closed, the FFT/beat visuals have nothing to react to (the analyser reads zero), and the timeline still advances on the wall clock so the show never freezes.</p>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">stderr</span><span class="lang">log</span></div>
+          <pre>[MAIN] no WAV/MP3 track found - the show will run silent (no built-in synth)
+[AUDIO] no track file - running silent (drop a WAV/MP3 to add music)</pre>
+        </div>
+        <p class="sec-sub" style="margin-top:16px">The shell searches, in order: the <code>--track=FILE</code> override, then common names in the current directory and the executable's directory — <code>ghostinthemachine.mp3</code>, <code>audio.mp3</code>, <code>assets/audio.mp3</code>, and the <code>.wav</code> variants.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Fix</th><th>Command</th></tr></thead>
+            <tbody>
+              <tr><td>Point at a specific file</td><td><code>./ns_demo.exe --track=music/ghost.mp3</code></td></tr>
+              <tr><td>Drop a track beside the exe</td><td>Name it <code>audio.mp3</code> or <code>ghostinthemachine.wav</code></td></tr>
+              <tr><td>Run deliberately silent</td><td><code>./ns_demo.exe --no-track</code></td></tr>
+              <tr><td>Verify decode headlessly</td><td><code>./ns_demo.exe --smoke-audio --track=music.mp3</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout tip">
+          <span class="ct-label">Tip</span>
+          <p>Decode failures for a <em>found</em> file (corrupt or unsupported format) keep the previous source — silence if none was playing — and the audio engine logs the reason. WAV (16/24-bit) and MP3 are the battle-tested formats.</p>
+        </div>
+      </section>
+
+      <section id="glfw-fetch">
+        <h2>GLFW fetch failures at configure</h2>
+        <p class="sec-sub">The build system first looks for a system GLFW (<code>find_package(glfw3)</code>). If none exists, CMake fetches GLFW 3.4 from GitHub at configure time — which needs network access.</p>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">terminal</span><span class="lang">bash</span></div>
+          <pre>cmake -S . -B build -DNS_BUILD_APP=ON   # fetches GLFW from github.com
+# fails with a network error when GitHub is unreachable</pre>
+        </div>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Fix</th><th>How</th></tr></thead>
+            <tbody>
+              <tr><td>Work offline (framework only)</td><td><code>cmake -S . -B build -DNS_BUILD_APP=OFF</code> — no GLFW needed for the framework + tests.</td></tr>
+              <tr><td>Install system GLFW</td><td><code>apt install libglfw3-dev</code> (Linux) or <code>brew install glfw</code> (macOS); find_package then skips the fetch.</td></tr>
+              <tr><td>Pre-seed the cache</td><td>Let a networked machine configure once; the downloaded GLFW sources cache in CMake's download dir and reuse on later configures.</td></tr>
+              <tr><td>Check proxy / mirrors</td><td>The fetch URL is <code>https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz</code> — corporate proxies or blocked hosts need a mirror or a vendored glfw3.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct-label">Window won't open</span>
+          <p>A different failure: <code>[MAIN] window creation failed</code> at runtime means the GL context couldn't be created — the engine wants OpenGL 3.3 core. Update GPU drivers, or check for remote-desktop/VMs that expose only older GL.</p>
+        </div>
+      </section>
+
+      <section id="plugin-load">
+        <h2>Plugin load failures</h2>
+        <p class="sec-sub">Plugins are shared libraries (<code>.dll</code> / <code>.so</code>) loaded from <code>data/plugins/</code> (or <code>--plugin=DIR</code>). Loading is best-effort: a bad plugin logs and continues — it never takes the show down.</p>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">stderr</span><span class="lang">log</span></div>
+          <pre>[FX] plugin load failed (dlopen): data/plugins/stars.so - cannot open shared object file
+[FX] plugin 'data/plugins/stars.dll' does not export ns_register_plugins()</pre>
+        </div>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Message</th><th>Cause &amp; fix</th></tr></thead>
+            <tbody>
+              <tr><td><code>plugin load failed (LoadLibrary / dlopen)</code></td><td>The OS refused the library — usually an architecture mismatch (plugin must match the exe: 64-bit exe → 64-bit plugin), a missing dependent DLL, or a missing file. <code>dlopen</code> appends <code>dlerror()</code>, which names the reason.</td></tr>
+              <tr><td><code>does not export ns_register_plugins()</code></td><td>The library loaded but lacks the entry point. Export exactly <code>extern "C" void ns_register_plugins()</code> and don't mangle it (no <code>namespace</code> wrapper, no C++ name mangling).</td></tr>
+              <tr><td>Plugin loads, effects missing</td><td>The entry point must call <code>ns::registerEffect(...)</code> for each effect <em>before it returns</em>. Verify with <code>[FX] plugin loaded: … (N effects registered)</code> — the count tells you if anything registered.</td></tr>
+              <tr><td>Plugin not scanned at all</td><td>Check the plugin dir exists and is passed: default is <code>data/plugins/</code>; override with <code>--plugin=DIR</code>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="path-resolution">
+        <h2>Path overrides &amp; the <code>NULLSECTOR_*_DIR</code> variables</h2>
+        <p class="sec-sub">The binary bakes the build machine's absolute source paths in at compile time. That breaks a packaged folder (exe + <code>shaders/</code> + <code>data/</code>) copied to another machine — every shader load fails and the demo degrades. So each runtime directory resolves by walking candidates in order:</p>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">resolution order (highest first)</span><span class="lang">logic</span></div>
+          <pre>1. env override       NULLSECTOR_*_DIR         exact, highest priority
+2. baked build path   NULLSECTOR_*_DIR define   only if it still exists
+3. exe directory      &lt;exe-dir&gt;/&lt;name&gt;          packaged folder: resources beside the exe
+4. working directory  ./&lt;name&gt;                  dev runs from the repo root
+→ falls back to the baked path when nothing exists,
+  so error messages still point at the build-time location</pre>
+        </div>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Env var</th><th>Resource root it controls</th></tr></thead>
+            <tbody>
+              <tr><td><code>NULLSECTOR_SHADER_DIR</code></td><td>Where <code>shaders/*.glsl</code> are found (<code>src/engine/paths.hpp</code>).</td></tr>
+              <tr><td><code>NULLSECTOR_ASSET_DIR</code></td><td>Where <code>assets/*</code> (textures, fonts) are found.</td></tr>
+              <tr><td><code>NULLSECTOR_DATA_DIR</code></td><td>Where <code>data/</code> (demo.nsd, post/, models/…) is found.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">terminal</span><span class="lang">bash</span></div>
+          <pre># packaged run: everything beside the exe, no source tree needed
+export NULLSECTOR_SHADER_DIR=/opt/show/shaders
+export NULLSECTOR_ASSET_DIR=/opt/show/assets
+export NULLSECTOR_DATA_DIR=/opt/show/data
+./ns_demo.exe --windowed</pre>
+        </div>
+        <p class="sec-sub" style="margin-top:16px">When a fallback kicks in, a one-line notice explains what happened:</p>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">stderr</span><span class="lang">log</span></div>
+          <pre>[PATHS] 'shaders' resolved to '/opt/show/shaders' (baked 'C:/src/NS_DemoEngine/shaders' not present)</pre>
+        </div>
+        <div class="callout note">
+          <span class="ct-label">SIGNAL LOST</span>
+          <p>If every shader fails to load, the demo degrades to "SIGNAL LOST" placeholder screens — that's the intended canary for a broken shader dir. Setting <code>NULLSECTOR_SHADER_DIR</code> (or placing <code>shaders/</code> beside the exe) fixes it.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Diagnostic checklist</h2>
+        <p class="sec-sub">When in doubt, run the shipped validations — they isolate engine, data and audio independently:</p>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">terminal</span><span class="lang">bash</span></div>
+          <pre>./build/Release/ns_fw_tests.exe            # framework + data-file parsing + live-reload chain (253 checks)
+./build/Release/ns_demo.exe --check-shaders # every engine stage + app lit program compile
+./build/Release/ns_demo.exe --check-models  # 3D pipeline: OBJ -> lit shader -> draw readback
+./build/Release/ns_demo.exe --check-hotreload --no-track  # live-reload smoke: keep-previous + recompile
+./build/Release/ns_demo.exe --check-shadertoy  # shadertoy pass pipeline: render + readback
+./build/Release/ns_demo.exe --smoke-audio --track=music.mp3  # track decode + analyser</pre>
+        </div>
+        <ul>
+          <li>Tests pass but the show breaks → your <em>data</em> is at fault; the log names the file.</li>
+          <li><code>--check-shaders</code> fails → the code regressed (an engine or app shader); that's a code issue, not data.</li>
+          <li><code>--check-models</code> fails → the 3D pipeline regressed (OBJ import, <code>lit</code> shader, material, or a shipped model/material file).</li>
+          <li><code>--check-hotreload</code> fails → hot reload regressed (a failed reload no longer keeps the previous program, or the retry no longer recompiles after a fix).</li>
+          <li><code>--check-shadertoy</code> fails → the Shadertoy pass pipeline regressed (the image pass isn't reaching the scene target, or a feedback loop goes solid).</li>
+          <li><code>--smoke-audio</code> fails → the track file, not the engine.</li>
+        </ul>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

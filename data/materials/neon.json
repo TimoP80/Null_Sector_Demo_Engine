@@ -1,0 +1,9 @@
+{
+  "name": "neon",
+  "baseColor": [0.08, 0.55, 1.0, 1.0],
+  "metallic": 0.0,
+  "roughness": 0.35,
+  "ao": 1.0,
+  "emission": [0.12, 0.45, 1.0],
+  "opacity": 1.0
+}

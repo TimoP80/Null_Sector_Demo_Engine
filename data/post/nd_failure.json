@@ -1,0 +1,12 @@
+{
+  "name": "nd_failure",
+  "passes": [
+    { "name": "chromatic", "amount": 0.02 },
+    { "name": "grain",     "amount": 0.4 },
+    { "name": "scanlines", "amount": 0.55 },
+    { "name": "pixelate",  "amount": 0.3 },
+    { "name": "vignette",  "amount": 0.65, "curve": 3.0 },
+    { "name": "grade",     "tonemap": false, "saturation": 1.45, "contrast": 1.3, "exposure": 1.08 },
+    { "name": "fxaa" }
+  ]
+}

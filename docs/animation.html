@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Animation — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">04</span> Authoring · Animation</p>
+        <h1>Animation System</h1>
+        <p class="lede">Keyframe animation for anything addressable by a property path — cameras, scene nodes, lights, effects, post parameters and text. Built from script blocks or JSON, played and stopped by timeline events, sampled per frame.</p>
+      </header>
+
+      <section>
+        <h2>Property paths</h2>
+        <p class="sec-sub">An animation has one or more <em>channels</em>, each targeting <code>target.property</code>. The target selects <em>what</em>, the property selects <em>which value</em>:</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Target</th><th>Properties</th><th>Script example</th></tr></thead>
+            <tbody>
+              <tr><td><code>camera</code></td><td><code>fov</code>, <code>pos</code>, <code>target</code></td><td><code>camera.pos</code>, <code>camera.fov</code></td></tr>
+              <tr><td><code>node:&lt;name&gt;</code></td><td><code>pos</code>, <code>rot</code>, <code>scale</code>, <code>color</code>, <code>opacity</code></td><td><code>node:gem.euler</code>, <code>node:caption.opacity</code></td></tr>
+              <tr><td><code>light:&lt;name&gt;</code></td><td><code>intensity</code>, <code>color</code></td><td><code>light:sun.intensity</code></td></tr>
+              <tr><td><code>effect:&lt;name&gt;</code></td><td><code>uniform:&lt;uName&gt;</code> — any shader uniform</td><td><code>effect:cathedral.uniform:uMode</code></td></tr>
+              <tr><td><code>post</code></td><td><code>exposure</code>, <code>bloom</code>, <code>glitch</code>, …</td><td><code>post.exposure</code>, <code>post.bloom</code></td></tr>
+              <tr><td><code>text:&lt;name&gt;</code> / <code>particle:&lt;name&gt;</code></td><td>values / parameters</td><td><code>text:caption.opacity</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Script syntax</h2>
+        <p class="sec-sub">Keyframes are <code>time value [interp]</code> rows; a bare <code>interp</code> after the target sets the channel default. Multiple channels can share one <code>anim</code> block.</p>
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/demo.nsd — the Asset Pipeline scene</span><span class="lang">nsd</span></div>
+          <pre>// one channel, scalar keys, default interp given per key
+at 4 { anim pillGlow effect:cathedral.uniform:uMode smooth {
+    0 0; 3 0.6; 6 0 } }
+
+// keyframed camera orbit — vector keys, per-key interpolators
+at 1 { anim camOrbit camera.pos smooth {
+    0 (0,1.2,7); 4 (2.4,1.6,5); 8 (0,2.0,3.4);
+    10 (-2.4,1.6,5); 12 (0,1.2,7) } }
+
+// node transforms — pos, euler rotation, opacity
+at 1 { anim gemSpin node:gem.euler linear { 0 (0,0,0); 9 (0,360,0) } }
+at 1 { anim gridBob node:terrain.pos bounce { 0 (0,-0.5,0); 4 (0,-0.35,0); 8 (0,-0.5,0) } }
+at 1 { anim captionFade node:caption.opacity elastic { 0 0; 2 1; 8 1 } }</pre>
+        </div>
+      </section>
+
+      <section>
+        <h2>Interpolators</h2>
+        <p class="sec-sub">Nine interpolators, each a named easing the keyframe rows (or the channel default) can request. The same functions back the camera-rig build-up ramps.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Name</th><th>Character</th><th>Use it for</th></tr></thead>
+            <tbody>
+              <tr><td><code>linear</code></td><td>Constant velocity</td><td>Spin, drift, sweep</td></tr>
+              <tr><td><code>smooth</code></td><td>Smoothstep, ease in &amp; out</td><td>The default for organic motion</td></tr>
+              <tr><td><code>cubic</code></td><td>Catmull-Rom spline through keys</td><td>Camera paths, flowing curves</td></tr>
+              <tr><td><code>bezier</code></td><td>Cubic Bézier with neighbour-derived handles</td><td>Full control, custom curves</td></tr>
+              <tr><td><code>ease-in</code></td><td>Accelerates from rest</td><td>Entrances, fall-away exits</td></tr>
+              <tr><td><code>ease-out</code></td><td>Decelerates to rest</td><td>Landings, arrivals</td></tr>
+              <tr><td><code>ease-in-out</code></td><td>Slow both ends</td><td>Idle loops, camera holds</td></tr>
+              <tr><td><code>bounce</code></td><td>Overshoots and rebounds</td><td>Weight, impact, drop-in UI</td></tr>
+              <tr><td><code>elastic</code></td><td>Springy overshoot wobble</td><td>Attention-grabbing entrances</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Runtime model</h2>
+        <ul>
+          <li><strong>Library</strong> — named <code>Animation</code> objects with channels; <code>add</code>/<code>get</code>.</li>
+          <li><strong>Playback</strong> — <code>play(name, startT, speed)</code>, <code>stop</code>, <code>seek</code>, <code>isPlaying</code>, plus <code>stopTarget</code> to cut every animation affecting one target.</li>
+          <li><strong>Sampling</strong> — <code>update(dt)</code> advances active animations and appends <code>AnimSample</code>s; the director drains them and applies <code>target.property = value</code> each frame.</li>
+          <li><strong>Evaluation</strong> — the static <code>sampleChannel</code>/<code>interpValue</code> helpers are pure and reusable; out-of-range times clamp to the nearest key.</li>
+        </ul>
+        <div class="callout note">
+          <span class="ct-label">Note</span>
+          <p>Out-of-range times clamp to the nearest key — so a keyframe at <code>0</code> and <code>9</code> with a hold means the value stays put after the last key. Add a final key to "park" a value.</p>
+        </div>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

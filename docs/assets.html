@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Assets &amp; Live Reload — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">10</span> Platform · Assets</p>
+        <h1>Assets &amp; Live Reload</h1>
+        <p class="lede">A centralized asset manager with caching, reference counting, unload and reload. Every kind of content the demo needs is a file — and every file hot-reloads while the show runs.</p>
+      </header>
+
+      <section>
+        <h2>Data layout</h2>
+        <p class="sec-sub">The runtime data root (<code>data/</code> by default, overridable via <code>NULLSECTOR_DATA_DIR</code>) organizes content by kind:</p>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/ — the whole demo, as files</span><span class="lang">tree</span></div>
+          <pre>data/
+├── demo.nsd            # the show: scenes, cues, rigs, animations
+├── post/               # post-processing presets (JSON)
+│   ├── cinematic.json  # bloom + grade + vignette + fxaa
+│   ├── vhs.json        # chromatic + scanlines + grain + pixelate
+│   └── clean.json
+├── shadertoy/          # imported Shadertoy shaders
+│   ├── plasma.glsl
+│   └── tunnel_warp.glsl
+├── models/             # OBJ meshes (terrain.obj, gem.obj …)
+├── materials/          # PBR materials (chrome.json, neon.json …)
+├── scenes/             # scene-graph JSON (lightbox.json …)
+├── timelines/          # timeline JSON (beat_map.json …)
+├── textures/           # PNG/JPEG sprites
+└── plugins/            # optional effect plugins (.dll/.so)</pre>
+        </div>
+      </section>
+
+      <section>
+        <h2>Asset kinds</h2>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Kind</th><th>Loader</th><th>Reload swaps</th></tr></thead>
+            <tbody>
+              <tr><td><code>texture</code></td><td>stb_image → GPU texture</td><td>Re-uploads pixels.</td></tr>
+              <tr><td><code>model</code></td><td>OBJ importer → index buffers</td><td>Re-imports geometry.</td></tr>
+              <tr><td><code>material</code></td><td>JSON → PBR material</td><td>Re-parses params.</td></tr>
+              <tr><td><code>scene</code></td><td>JSON → <code>SceneGraph</code></td><td>Rebuilds the graph.</td></tr>
+              <tr><td><code>timeline</code></td><td>JSON → <code>TimelineEditor</code></td><td>Rebuilds tracks/events.</td></tr>
+              <tr><td><code>script</code></td><td>Text → <code>ScriptEngine</code></td><td>Re-parses, rebuilds events.</td></tr>
+              <tr><td><code>shader</code></td><td>ShaderManager (tracks source)</td><td>Recompiles program.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="sec-sub" style="margin-top:16px">Handles are opaque; each loader returns a heap object its free function deletes. Reload functions swap the object in place and bump a version counter so renderers rebind — never a stale pointer, never a restart.</p>
+      </section>
+
+      <section>
+        <h2>Reference counting</h2>
+        <p class="sec-sub">Assets are cached by path. Acquire bumps the refcount and returns the cached handle; release drops it; unreferenced assets are eligible for unload. In practice the director acquires once per named asset (sprites, models, materials) — loading the same texture every frame is both wasteful and a refcount leak, so keep acquisitions at setup time.</p>
+      </section>
+
+      <section>
+        <h2>Live reload</h2>
+        <p class="sec-sub">A polling <code>FileWatcher</code> watches the script and the content directories. Each frame the director asks what changed and reloads exactly that:</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>File changed</th><th>What happens</th></tr></thead>
+            <tbody>
+              <tr><td><code>demo.nsd</code> (or <kbd>F2</kbd>)</td><td>Re-parse, rebuild timeline events + section schedule, restart cleanly.</td></tr>
+              <tr><td><code>*.frag</code> / <code>*.vert</code></td><td>Recompile via ShaderManager; active effects pick it up next frame.</td></tr>
+              <tr><td>Shadertoy <code>.glsl</code></td><td>Importer re-parses and rebuilds all passes.</td></tr>
+              <tr><td>texture / model / material</td><td>Reload in place, version bump.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout tip">
+          <span class="ct-label">Workflow</span>
+          <p>This is the entire point: write a shader, save, watch it go live; tweak a camera rig, save, press <kbd>F2</kbd>. Iteration speed is the demoscene superpower, and here it costs nothing.</p>
+        </div>
+        <div class="callout note">
+          <span class="ct-label">Failure modes</span>
+          <p>A load that fails is <strong>not terminal</strong>: the entry stays registered and <code>reloadDirty()</code> retries the loader, so an asset dropped in after the show started is picked up live. A <em>deleted</em> file fails loudly once (previous version kept, <code>[ASSET]</code> warns) and recovers automatically when the file comes back. Paths are compared canonically (separator-agnostic), so watcher-reported and app-acquired paths always match — the framework test suite locks this chain in.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Models &amp; materials</h2>
+        <p class="sec-sub">The OBJ importer (<code>src/app/model.cpp</code>) builds indexed buffers with positions, normals, UVs and computed tangents; a forward-lit PBR-ish shader consumes them. Materials are JSON — base color, metallic, roughness, AO, emission, opacity:</p>
+        <div class="code" data-lang="json">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/materials/chrome.json</span><span class="lang">json</span></div>
+          <pre>{
+  "name": "chrome",
+  "baseColor": [0.85, 0.9, 1.0, 1.0],
+  "metallic": 1.0,
+  "roughness": 0.08,
+  "ao": 1.0,
+  "emission": [0.0, 0.0, 0.0],
+  "opacity": 1.0
+}</pre>
+        </div>
+        <p class="sec-sub" style="margin-top:16px">Scene-graph mesh nodes reference models and materials <em>by name</em>; the director binds the actual <code>Material</code> at draw time, so swapping a material file restyles a model with zero script changes.</p>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

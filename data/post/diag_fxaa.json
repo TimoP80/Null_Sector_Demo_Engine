@@ -1,0 +1,6 @@
+{
+  "name": "diag_fxaa",
+  "passes": [
+    { "name": "fxaa" }
+  ]
+}

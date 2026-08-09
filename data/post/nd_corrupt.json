@@ -1,0 +1,12 @@
+{
+  "name": "nd_corrupt",
+  "passes": [
+    { "name": "chromatic", "amount": 0.012 },
+    { "name": "grain",     "amount": 0.28 },
+    { "name": "scanlines", "amount": 0.45 },
+    { "name": "pixelate",  "amount": 0.22 },
+    { "name": "vignette",  "amount": 0.6, "curve": 2.6 },
+    { "name": "grade",     "tonemap": false, "saturation": 1.3, "contrast": 1.22, "exposure": 1.05 },
+    { "name": "fxaa" }
+  ]
+}

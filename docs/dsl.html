@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scripting DSL — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">02</span> Authoring · Scripting</p>
+        <h1>The Scripting DSL</h1>
+        <p class="lede">A production is a plain-text script of <code>scene</code> blocks and <code>at</code> blocks. The parser turns it into timeline events, camera rigs, animations, scene-graph nodes and post presets — no C++ involved.</p>
+      </header>
+
+      <section>
+        <h2>Shape of a script</h2>
+        <p class="sec-sub">A script is a list of declarations: an optional <code>demo</code> header, any number of <code>scene</code> blocks, and any number of top-level <code>at</code> blocks. Commands are line-oriented — <code>;</code> or a newline separates them, <code>{ }</code> group options. Comments are <code>//</code>, <code>#</code>, or <code>/* ... */</code>.</p>
+
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/demo.nsd</span><span class="lang">nsd</span></div>
+          <pre>// header: the show title, tempo and total length
+demo "GHOST IN THE MACHINE" {
+    bpm 216
+    duration 125
+}
+
+// a scene: setup commands run when the scene activates
+scene Intro {
+    bars 12  intensity 0.12  chapter 0
+    title "Awakening"
+    camera IntroCam { rig drift; pos (0,0,2.4); fov (50,58); amp 1.6; freq 0.14 }
+    show intro
+    play music
+    fade in 2
+    at 4 { anim introBloom post.bloom smooth { 0 1.2; 3 2.4; 6 1.5 } }
+    at 11 { transition fade 1 }
+}
+
+// top-level at: absolute show time, fires once
+at 0    { show Intro;    marker Awakening }
+at 13.3 { show Cathedral; marker Nave }
+at 64.4 { show Shadertoy; marker Imported }</pre>
+        </div>
+      </section>
+
+      <section>
+        <h2>Blocks</h2>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Block</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><td><code>demo "TITLE" { ... }</code></td><td>Show metadata: <code>bpm</code> (tempo, beats-per-minute), <code>duration</code> (total seconds; otherwise inferred from scenes).</td></tr>
+              <tr><td><code>scene Name { ... }</code></td><td>A section of the show: metadata pairs (<code>bars</code>, <code>intensity</code>, <code>chapter</code>, <code>title</code>) plus setup commands and scene-relative <code>at</code> sub-blocks (times count from scene start).</td></tr>
+              <tr><td><code>at TIME { ... }</code></td><td>An absolute-time event on the show timeline; its commands fire when the clock crosses <code>TIME</code>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4>Scene metadata</h4>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Pair</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>bars N</code></td><td>Section length in bars (4 beats @ bpm). Drives section scheduling.</td></tr>
+              <tr><td><code>intensity X</code></td><td>0..1 energy level — available to effects and the music-reactive post chain.</td></tr>
+              <tr><td><code>chapter N</code></td><td>Act grouping (used by jump-to-section).</td></tr>
+              <tr><td><code>title "Text"</code></td><td>Display title for the section.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Time formats</h2>
+        <p class="sec-sub">Any of these are valid wherever a time is expected — <code>at</code> block start, <code>anim</code> keyframes, <code>marker</code>:</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Format</th><th>Examples</th><th>Notes</th></tr></thead>
+            <tbody>
+              <tr><td><code>N</code> or <code>N.N</code></td><td><code>12.5</code>, <code>40</code></td><td>Seconds.</td></tr>
+              <tr><td><code>N s</code></td><td><code>66.667s</code></td><td>Explicit seconds.</td></tr>
+              <tr><td><code>mm:ss(.ms)</code></td><td><code>1:05.0</code>, <code>1:48.9</code></td><td>Clock time.</td></tr>
+              <tr><td><code>beat N</code></td><td><code>beat 128</code></td><td>Beat number, resolved against the declared <code>bpm</code>.</td></tr>
+              <tr><td><code>bar N</code></td><td><code>bar 32</code></td><td>Bar number (4 beats each) — great for music-synced cues.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Commands</h2>
+        <p class="sec-sub">Commands appear inside <code>at</code> blocks, inside <code>scene</code> setup, or both. Scalar options accept a plain number <em>or</em> a <code>(base, target)</code> ramp that eases from base to target across the scene's build-up window.</p>
+
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Command</th><th>Example</th><th>What it does</th></tr></thead>
+            <tbody>
+              <tr><td><code>show</code> / <code>hide</code></td><td><code>show cathedral { mode 1 }</code></td><td>Activate / deactivate an effect by name; options become effect params.</td></tr>
+              <tr><td><code>load</code></td><td><code>load shadertoy plasma.glsl</code></td><td>Import at runtime: <code>shadertoy</code>, <code>model</code>, <code>material</code>, <code>plugin</code>, <code>effect</code>.</td></tr>
+              <tr><td><code>shader</code></td><td><code>shader dataviz_bg.frag</code></td><td>Swap the fullscreen backdrop shader (scene <code>Quad</code> node).</td></tr>
+              <tr><td><code>camera</code></td><td><code>camera NetCam { rig orbit; radius 4.5; omega 0.45 }</code></td><td>Create / switch the active camera rig (see <a href="cameras.html">Camera Rigs</a>).</td></tr>
+              <tr><td><code>play</code></td><td><code>play music</code></td><td>Start the track.</td></tr>
+              <tr><td><code>fade</code></td><td><code>fade in 2</code>, <code>fade out 2</code></td><td>Fade from / to black over N seconds.</td></tr>
+              <tr><td><code>transition</code></td><td><code>transition fade 1</code></td><td>Scene transition shader over N seconds.</td></tr>
+              <tr><td><code>post</code></td><td><code>post preset cinematic</code>, <code>post legacy</code>, <code>post { key v }</code></td><td>Switch the post-processing chain (see <a href="postfx.html">Post FX</a>).</td></tr>
+              <tr><td><code>anim</code></td><td><code>anim camOrbit camera.pos smooth { 0 (0,1.2,7); 4 (2.4,1.6,5) }</code></td><td>Define &amp; play a keyframed animation (see <a href="animation.html">Animation</a>).</td></tr>
+              <tr><td><code>marker</code></td><td><code>marker Awakening</code></td><td>Drop a named cue on the timeline (scrubbing, rehearsal).</td></tr>
+              <tr><td><code>speed</code></td><td><code>speed 0.5</code></td><td>Scale the show clock.</td></tr>
+              <tr><td><code>loop</code></td><td><code>loop section</code></td><td>Toggle looping (whole show or current section).</td></tr>
+              <tr><td><code>jump</code></td><td><code>jump 40</code></td><td>Seek the timeline to an absolute time.</td></tr>
+              <tr><td><code>mesh</code> / <code>sprite</code> / <code>text</code> / <code>light</code> / <code>particles</code> / <code>empty</code></td><td><code>mesh gem { model gem.obj; material neon; pos (2.2,1.4,0) }</code></td><td>Build a scene-graph node (see <a href="scene.html">Scene Graph</a>).</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Values</h2>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Value</th><th>Examples</th></tr></thead>
+            <tbody>
+              <tr><td>Number</td><td><code>216</code>, <code>0.45</code>, <code>1.5</code></td></tr>
+              <tr><td>String</td><td><code>"Awakening"</code>, <code>"ghost_logo.png"</code></td></tr>
+              <tr><td>Vector</td><td><code>(0, 1.2, 7)</code> — 2, 3 or 4 components as the target needs</td></tr>
+              <tr><td>Ramp</td><td><code>fov (50, 58)</code>, <code>amp (1.0, 2.8)</code> — base to target over the build-up window</td></tr>
+              <tr><td>Option block</td><td><code>{ rig orbit; radius 4.5; omega 0.45 }</code> — named options</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout note">
+          <span class="ct-label">Note</span>
+          <p>Unknown commands or malformed times raise a <code>ScriptError</code> with a message naming the file and token — the unit tests deliberately feed the shipped <code>demo.nsd</code> through the parser so data regressions surface in CI, not on stage.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Parsing model</h2>
+        <p class="sec-sub">The parser (<code>src/framework/script/scriptparser.{hpp,cpp}</code>) produces a typed AST: <code>Script</code> → <code>SceneDef</code> + <code>ScriptBlock</code> + <code>Cmd</code>. The <code>ScriptEngine</code> (<code>src/framework/script/scriptengine.cpp</code>) then:</p>
+        <ul>
+          <li>compiles every <code>at</code> block into a <strong>timeline event</strong>, sorted by time;</li>
+          <li>builds a <strong>section schedule</strong> from scene lengths and activation times;</li>
+          <li>keeps <code>scene</code> setup commands as activation bundles the director fires on section entry.</li>
+        </ul>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

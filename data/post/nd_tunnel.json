@@ -1,0 +1,11 @@
+{
+  "name": "nd_tunnel",
+  "passes": [
+    { "name": "bloom",     "threshold": 1.0, "intensity": 1.4 },
+    { "name": "chromatic", "amount": 0.004 },
+    { "name": "grain",     "amount": 0.12 },
+    { "name": "vignette",  "amount": 0.5, "curve": 2.2 },
+    { "name": "grade",     "tonemap": true, "saturation": 1.05, "contrast": 1.08, "exposure": 1.02 },
+    { "name": "fxaa" }
+  ]
+}

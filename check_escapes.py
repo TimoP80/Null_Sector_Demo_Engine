@@ -1,0 +1,7 @@
+data = open('src/main.cpp', 'rb').read().decode('utf-8')
+nl = chr(10)
+bs = chr(92)
+print('real-newline in saved:', data.count(')' + nl + '", shotFile'))
+print('bs-n in saved:        ', data.count(')' + bs + 'n", shotFile'))
+print('real-newline in seek: ', data.count('%.1fs' + nl + '",'))
+print('bs-n in seek:         ', data.count('%.1fs' + bs + 'n",'))

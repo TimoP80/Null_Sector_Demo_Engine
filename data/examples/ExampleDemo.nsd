@@ -1,0 +1,75 @@
+// ===========================================================================
+// EXAMPLE DEMO  -  a minimal production, separate from GHOST IN THE MACHINE.
+//
+// Run it with:   ns_demo --demo=data/examples/ExampleDemo.nsd
+// Validate it:   ns_demo --check-production=data/examples/ExampleDemo.nsd
+//
+// The point of this file is to show the whole .nsd format on one page:
+//   - a `demo` header (title, tempo, duration - `tempo` is an alias for bpm)
+//   - four scenes (Intro / Plasma / Tunnel / Outro), each with a camera rig
+//   - scenes are activated by top-level `at` events (seconds or bar/beat
+//     units - `at bar 4` means bar 4 at the declared tempo)
+//   - a built-in effect, an imported Shadertoy shader, and a post shorthand
+//     (`bloom 0.8` inside a scene is sugar for `post { bloom 0.8 }`)
+//   - fade in/out + a transition, and a marker on every scene entry
+//
+// Every effect here is built in - no plugins, no extra assets required.
+// ===========================================================================
+demo "EXAMPLE DEMO" {
+    tempo 140
+    duration 42
+}
+
+// ---------------------------------------------------------------------------
+// SCENE 1 // Intro (0:00) - the built-in intro sequence
+// ---------------------------------------------------------------------------
+scene Intro {
+    bars 4  intensity 0.3  chapter 0
+    title "Wake"
+    camera IntroCam { rig static; pos (0,0,2.4); target (0,0,0); fov 55 }
+    show intro
+    fade in 1
+}
+
+// ---------------------------------------------------------------------------
+// SCENE 2 // Plasma (0:06.9) - a Shadertoy import at 140 bpm (1 bar = 1.71 s)
+// ---------------------------------------------------------------------------
+scene Plasma {
+    bars 8  intensity 0.5  chapter 1
+    title "Plasma"
+    camera PlasmaCam { rig drift; pos (0,0,1.6); amp 1.4; freq 0.18; fov 62 }
+    load shadertoy plasma.glsl
+    show shadertoy:plasma.glsl
+    bloom 0.8
+}
+
+// ---------------------------------------------------------------------------
+// SCENE 3 // Tunnel (0:20.6) - the neon tunnel, mode 1
+// ---------------------------------------------------------------------------
+scene Tunnel {
+    bars 8  intensity 0.6  chapter 2
+    title "Tunnel"
+    camera TubeCam { rig fly; pos (0,0,14); speed 16; fov 64 }
+    show tunnel { mode 1 }
+}
+
+// ---------------------------------------------------------------------------
+// SCENE 4 // Outro (0:34.3) - the greeting card, then fade to black
+// ---------------------------------------------------------------------------
+scene Outro {
+    bars 4  intensity 0.3  chapter 5
+    title "Outro"
+    camera OutCam { rig static; pos (0,0,2); target (0,0,0); fov 55 }
+    show greetings { mode 0 }
+    fade in 1
+    at 3 { fade out 2 }
+}
+
+// ---------------------------------------------------------------------------
+// The show: one activation per scene. Section boundaries + the timeline
+// schedule derive from these exact times.
+// ---------------------------------------------------------------------------
+at 0      { show Intro;   marker Wake }
+at bar 4  { show Plasma;  marker Plasma }
+at bar 12 { show Tunnel;  marker Tunnel }
+at bar 20 { show Outro;   marker Outro }

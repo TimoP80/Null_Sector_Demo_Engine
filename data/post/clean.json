@@ -1,0 +1,7 @@
+{
+  "name": "clean",
+  "passes": [
+    { "name": "grade", "tonemap": true, "saturation": 1.0, "contrast": 1.02, "exposure": 1.0 },
+    { "name": "fxaa" }
+  ]
+}

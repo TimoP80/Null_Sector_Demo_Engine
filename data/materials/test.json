@@ -1,0 +1,9 @@
+{
+  "name": "test",
+  "baseColor": [0.75, 0.78, 0.85, 1.0],
+  "metallic": 0.1,
+  "roughness": 0.45,
+  "ao": 1.0,
+  "emission": [0.0, 0.0, 0.0],
+  "opacity": 1.0
+}

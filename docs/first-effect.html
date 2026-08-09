@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Writing Your First Effect — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">12</span> Tutorial</p>
+        <h1>Writing Your First Effect</h1>
+        <p class="lede">A full walkthrough: write a fragment shader, wrap it in an effect class, register it, script it into <code>demo.nsd</code>, and animate its uniforms — with the engine's exact APIs, start to finish.</p>
+      </header>
+
+      <section>
+        <h2>The Effect contract</h2>
+        <p class="sec-sub">Every effect — built-in or plugin — derives from <code>Effect</code> and implements a three-method lifecycle. The engine loop never calls anything else; everything it needs arrives through <code>EffectContext</code>.</p>
+        <div class="code" data-lang="cpp">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">src/effects/base_fwd.hpp</span><span class="lang">cpp</span></div>
+          <pre>class Effect {
+public:
+    virtual ~Effect() = default;
+
+    /** build programs + targets once the GL context and assets exist */
+    virtual void init(EffectContext&amp; ctx) = 0;
+    /** render into ctx-&gt;hdr (the target is bound and cleared by the caller) */
+    virtual void render(EffectContext&amp; ctx) = 0;
+    /** rebuild per-resolution targets after a window resize */
+    virtual void resize(EffectContext&amp; ctx) {}
+};</pre>
+        </div>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Field</th><th>What it hands you</th></tr></thead>
+            <tbody>
+              <tr><td><code>ctx.r</code></td><td>Renderer: <code>fsTriangle</code> (the fullscreen triangle), viewport size (<code>resW</code>/<code>resH</code>).</td></tr>
+              <tr><td><code>ctx.assets</code></td><td>Font atlas + metrics (for in-shader glyph drawing).</td></tr>
+              <tr><td><code>ctx.timeline</code></td><td>Beat/bar/section clock — <code>s.transition</code>, <code>s.beatPulse</code>, section length.</td></tr>
+              <tr><td><code>ctx.camera</code></td><td>View/proj, shake and DOF params.</td></tr>
+              <tr><td><code>ctx.audio</code></td><td>Reactive analyser: <code>react.bass</code>, <code>react.kick</code>, <code>react.beat</code>, …</td></tr>
+              <tr><td><code>ctx.shared</code></td><td>The <code>NullBlock</code> UBO (written before render — camera, <code>uBass</code>, <code>uBeat</code>, section state).</td></tr>
+              <tr><td><code>ctx.post</code></td><td>Music-driven post params (bloom/glitch/exposure) + <code>prevFrameTex()</code> for handoffs.</td></tr>
+              <tr><td><code>ctx.hdr</code></td><td>The current HDR scene target your effect renders into.</td></tr>
+              <tr><td><code>ctx.time</code> / <code>ctx.dt</code></td><td>Show clock seconds / frame delta.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout tip">
+          <span class="ct-label">Shortcut</span>
+          <p>Most fullscreen effects never need a custom class at all — the built-in <code>SceneFX</code> driver loads any <code>.frag</code> over the fullscreen triangle and handles the shared uniforms, kick flash and music-reactive post params. This tutorial starts with that shortcut, then shows the full class.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Step 1 — the shader</h2>
+        <p class="sec-sub">Effects render through the shared <code>fullscreen.vert</code> + your fragment shader. Put the <code>.frag</code> in the shader dir (resolved via <code>NULLSECTOR_SHADER_DIR</code>, default <code>shaders/</code>). Shaders can <code>#include &lt;common&gt;</code> for the shared math + <code>NullBlock</code> UBO, and declare their own uniforms for the animation system to drive.</p>
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">shaders/mystars.frag</span><span class="lang">glsl</span></div>
+          <pre>#version 300 es
+#include &lt;common&gt;              // shared math + the NullBlock UBO
+
+uniform float uGlow;          // driven by the animation system (anim ... uniform:uGlow)
+uniform float uSpin;          // per-scene param set at show time
+
+out vec4 fragColor;           // GL 330 core — never gl_FragColor
+in vec2 vUV;                  // 0..1 UV from fullscreen.vert
+
+void main() {
+    vec2 uv = vUV * 2.0 - 1.0;
+    uv.x *= Null.uRes.x / Null.uRes.y;
+    float t = Null.uTime * 0.25 + uSpin;
+
+    // a few rotating star glyphs
+    vec3 col = vec3(0.02, 0.03, 0.06);
+    for (int i = 0; i &lt; 6; i++) {
+        float a = float(i) * 1.047 + t;
+        vec2 p = vec2(cos(a), sin(a)) * 0.45;
+        float d = length(uv - p);
+        col += vec3(1.0, 0.9, 0.7) * uGlow * exp(-d * 18.0);
+    }
+
+    // beat pulse + bass hue wobble come from the shared NullBlock UBO
+    col *= 1.0 + 0.25 * Null.uPulse;
+    col = mix(col, col.gbr, 0.08 * Null.uBass);
+
+    fragColor = vec4(col, 1.0);
+}</pre>
+        </div>
+        <div class="callout note">
+          <span class="ct-label">Note</span>
+          <p>Effect shaders are written in GLSL ES 3.00 style (<code>#version 300 es</code>, <code>out vec4</code>) — the engine rewrites them to desktop GL 330 core automatically, exactly like <code>cathedral.frag</code> and the other scene shaders. And this is a plain fullscreen shader, not a Shadertoy: if you're <em>porting</em> from Shadertoy, skip this class and use the <a href="shadertoy.html">Shadertoy importer</a>, which handles <code>iTime</code>/<code>iResolution</code>/<code>iChannel*</code> for you.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Step 2 — the class</h2>
+        <p class="sec-sub">Two options: the shortcut (<code>SceneFX</code> driver, zero code beyond registration) or a full custom class. The full class gives you per-frame control over uniforms, blending and state.</p>
+
+        <h4>Option A — the shortcut</h4>
+        <p class="sec-sub">Zero code beyond the registration line: the built-in <code>SceneFX</code> driver loads your <code>.frag</code>, applies the shared uniforms, the kick flash, and the <code>extraUniforms</code> map the animation system writes into.</p>
+        <div class="code" data-lang="cpp">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">registration only — no class needed</span><span class="lang">cpp</span></div>
+          <pre>registerEffect("mystars", [](const Value&amp; p) {
+    auto e = std::make_unique&lt;SceneFX&gt;("mystars.frag");   // fullscreen driver
+    e-&gt;mode = p.get("mode").asFloat(0);
+    e-&gt;renderScale = p.get("renderScale").asFloat(1.0f);
+    return e;
+});</pre>
+        </div>
+
+        <h4>Option B — a custom class</h4>
+        <p class="sec-sub">For per-frame control beyond what the driver offers, subclass <code>SceneFX</code> and override <code>render()</code>. Deriving from <code>SceneFX</code> is what makes <code>anim … effect:NAME.uniform:uX</code> work: the director writes animated values into <code>extraUniforms</code>, and <code>SceneFX::render</code> applies them for you — a bare <code>Effect</code> subclass receives neither uniform writes nor the audio feeds.</p>
+        <div class="code" data-lang="cpp">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">src/effects/mystars.hpp</span><span class="lang">cpp</span></div>
+          <pre>#pragma once
+#include "effects/scene.hpp"       // SceneFX: fullscreen driver + extraUniforms
+#include "framework/core/value.hpp"
+#include &lt;memory&gt;
+
+namespace ns {
+
+// Custom effect: extends the driver, adds beat-reactive spin.
+class MyStarsFX : public SceneFX {
+public:
+    explicit MyStarsFX(float spin = 0.0f)
+        : SceneFX("mystars.frag"), spin_(spin) {}
+
+    void render(EffectContext&amp; ctx) override {
+        // spin accelerates with the beat pulse from the timeline
+        const float pulse = ctx.timeline ? ctx.timeline-&gt;s.beatPulse : 0.0f;
+        extraUniforms["uSpin"] = spin_ * (1.0f + pulse * 0.5f);
+        SceneFX::render(ctx);       // applies uFlash/uMode/extraUniforms, draws
+    }
+
+private:
+    float spin_ = 0.0f;
+};
+
+}  // namespace ns</pre>
+        </div>
+        <div class="callout warn">
+          <span class="ct-label">Uniform animation contract</span>
+          <p>The <code>anim … effect:NAME.uniform:uX</code> command writes into your effect's <code>extraUniforms</code> map — the same contract <code>SceneFX</code> and <code>ShadertoyFX</code> use. As long as your class is a <code>SceneFX</code> (or subclass), the director finds the map and <code>SceneFX::render</code> applies it; override <code>render()</code> only when you need extra per-frame behavior, and call the base at the end.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Step 3 — register it</h2>
+        <p class="sec-sub">One line in <code>registerBuiltinEffects()</code> (<code>src/app/effectreg.cpp</code>) makes the name available to scripts — or ship it as a <a href="plugins.html">plugin</a> with zero engine changes.</p>
+        <div class="code" data-lang="cpp">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">src/app/effectreg.cpp</span><span class="lang">cpp</span></div>
+          <pre>void registerBuiltinEffects() {
+    registerEffect("intro",  [] { return std::make_unique&lt;IntroFX&gt;(); });
+    registerEffect("tunnel", [] { return std::make_unique&lt;TunnelFX&gt;(); });
+    // … existing effects …
+    registerEffect("mystars", [](const Value&amp; p) {
+        return std::make_unique&lt;MyStarsFX&gt;(p.get("spin").asFloat(0.0f));
+    });
+}</pre>
+        </div>
+        <p class="sec-sub" style="margin-top:16px">As a plugin instead, compile the class into a shared library exporting <code>extern "C" void ns_register_plugins()</code> that calls <code>registerEffect("mystars", …)</code>, drop it in <code>data/plugins/</code>, and the effect appears without touching the engine at all.</p>
+      </section>
+
+      <section>
+        <h2>Step 4 — script it</h2>
+        <p class="sec-sub">A scene that activates the effect, with construction params and a uniform animation on its <code>uGlow</code>:</p>
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/demo.nsd</span><span class="lang">nsd</span></div>
+          <pre>scene Stars {
+    bars 8   intensity 0.6  chapter 1
+    title "My First Effect"
+    camera StarCam { rig drift; pos (0,0,2); target (0,0,0); amp 1.2; freq 0.2 }
+    show mystars { spin 1.7 }                     // construction params -> factory
+
+    // animate the effect's uGlow uniform across the scene
+    at 1 { anim glowPulse effect:mystars.uniform:uGlow smooth {
+        0 0.0; 3 2.5; 6 0.8 } }
+
+    at 7 { transition fade 1 }
+}
+
+at 60 { show Stars; marker FirstEffect }</pre>
+        </div>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Script bit</th><th>What happens</th></tr></thead>
+            <tbody>
+              <tr><td><code>show mystars { spin 1.7 }</code></td><td>Instantiates via the registered factory, passing <code>spin</code> into the constructor.</td></tr>
+              <tr><td><code>anim glowPulse effect:mystars.uniform:uGlow …</code></td><td>Keyframes write into <code>extraUniforms["uGlow"]</code>; your <code>render()</code> applies it every frame.</td></tr>
+              <tr><td><code>at 7 { transition fade 1 }</code></td><td>Scene exit — the effect keeps rendering until hidden.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Step 5 — iterate live</h2>
+        <p class="sec-sub">Edit <code>shaders/mystars.frag</code> and save while the show runs — the shader manager hot-reloads it and the effect picks up the new source next frame. Edit <code>demo.nsd</code> and press <kbd>F2</kbd> to re-parse the whole show. That loop — tweak, save, watch — is the whole point.</p>
+        <div class="callout tip">
+          <span class="ct-label">Now try</span>
+          <p>Give it a kick flash: read <code>ctx.audio-&gt;react.kick</code> (or the <code>uPulse</code> UBO member) and add it to <code>uGlow</code>. Give it a transition: declare <code>uPrevScene</code>/<code>uTransition</code> and set <code>handoff</code> in the factory. Then export the whole thing as a <a href="plugins.html">plugin</a> and your effect is reusable across demos.</p>
+        </div>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

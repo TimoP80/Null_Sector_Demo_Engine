@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shader Manager — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">07</span> Rendering · Shaders</p>
+        <h1>Shader Manager</h1>
+        <p class="lede">A modern shader layer: automatic compilation, <code>#include</code> support with dependency tracking, caching, reflection and uniform binding — plus hot reload that recompiles any shader when it (or an included file) changes on disk.</p>
+      </header>
+
+      <section>
+        <h2>Features</h2>
+        <div class="grid">
+          <div class="card"><span class="glyph">⚙</span><h3>Automatic compilation</h3><p>Vertex/fragment pairs compile and link on demand; failures log the stage, file and source line instead of dying.</p></div>
+          <div class="card"><span class="glyph">#</span><h3>Include support</h3><p><code>#include "common.glsl"</code> resolves relative to the shader dir; the dependency graph is tracked for reloads.</p></div>
+          <div class="card"><span class="glyph">▣</span><h3>Caching</h3><p>Programs are cached by name and shared — effects, post passes and sprites never recompile identical sources.</p></div>
+          <div class="card"><span class="glyph">⟲</span><h3>Hot reload</h3><p>The file watcher notices changes and recompiles affected programs live; version counters let renderers rebind.</p></div>
+          <div class="card"><span class="glyph">◌</span><h3>Reflection</h3><p>Active uniforms are queried after link — the director uses this to bind <code>uBass</code>, <code>uTime</code>, matrices, and per-effect <code>uniform:&lt;name&gt;</code> animation targets.</p></div>
+          <div class="card"><span class="glyph">⛓</span><h3>Uniform binding</h3><p>Typed setters (<code>set1f</code>, <code>setVec</code>, <code>setMat4</code>, <code>set1i</code>) driven by the reflected uniform table — unknown uniforms are safely skipped.</p></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Shader layout</h2>
+        <p class="sec-sub">Engine shaders live in <code>shaders/</code>; effect shaders are GLSL on disk, loaded by the asset manager and compiled by the manager. A shared header carries the common uniforms:</p>
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">shaders/common.glsl (excerpt)</span><span class="lang">glsl</span></div>
+          <pre>#ifndef NULLSECTOR_COMMON_GLSL
+#define NULLSECTOR_COMMON_GLSL
+
+uniform float uTime;
+uniform vec2  uResolution;
+uniform float uBass, uMid, uTreble, uKick, uVolume, uBeat; // audio feeds
+uniform mat4  uView, uProj, uVpInv;
+
+#endif</pre>
+        </div>
+      </section>
+
+      <section>
+        <h2>Audio-reactive uniforms</h2>
+        <p class="sec-sub">The audio analyser publishes <code>bass / mid / treble / kick / beat / volume</code> every frame; the director pushes them into every active effect under the <code>uBass … uBeat</code> names. Any shader that declares them becomes music-reactive with zero wiring.</p>
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">example — pulse with the kick</span><span class="lang">glsl</span></div>
+          <pre>vec3 col = baseColor * (1.0 + 0.6 * uKick);   // slam on the drum
+col *= 0.7 + 0.6 * uBass;                      // breathe with the bass</pre>
+        </div>
+      </section>
+
+      <section>
+        <h2>Validation</h2>
+        <p class="sec-sub">Every engine shader stage — plus the app's forward-lit <code>lit.vert + lit.frag</code> program — is compiled at startup with <code>--check-shaders</code> (68/68 engine stages pass in the shipped tree). Shaders referenced only by data are compiled when the effect first shows — and recompiled automatically on hot reload.</p>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

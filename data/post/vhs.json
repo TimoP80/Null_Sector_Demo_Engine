@@ -1,0 +1,10 @@
+{
+  "name": "vhs",
+  "passes": [
+    { "name": "chromatic", "amount": 0.004 },
+    { "name": "grain",     "amount": 0.22 },
+    { "name": "scanlines", "amount": 0.35 },
+    { "name": "vignette",  "amount": 0.55, "curve": 2.8 },
+    { "name": "grade",     "tonemap": false, "saturation": 0.88, "contrast": 1.18, "exposure": 1.02 }
+  ]
+}

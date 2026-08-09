@@ -1,0 +1,57 @@
+{
+  "duration": 125.0,
+  "tracks": [
+    { "name": "visuals", "type": "effect" },
+    { "name": "camera", "type": "camera" },
+    { "name": "post", "type": "post" }
+  ],
+  "events": [
+    {
+      "name": "intro",
+      "time": 0.0,
+      "duration": 0.0,
+      "track": 0,
+      "cmds": [
+        { "name": "camera", "args": ["IntroCam"], "opts": { "rig": "drift", "pos": [0, 0, 2.4] } },
+        { "name": "show", "args": ["intro"], "opts": {} }
+      ]
+    },
+    {
+      "name": "cathedral",
+      "time": 13.3,
+      "duration": 0.0,
+      "track": 0,
+      "cmds": [
+        { "name": "show", "args": ["cathedral"], "opts": {} },
+        { "name": "post", "args": ["legacy"], "opts": {} }
+      ]
+    },
+    {
+      "name": "preset-cinematic",
+      "time": 26.7,
+      "duration": 0.0,
+      "track": 2,
+      "cmds": [
+        { "name": "post", "args": ["preset", "cinematic"], "opts": {} }
+      ]
+    },
+    {
+      "name": "fade-out",
+      "time": 123.0,
+      "duration": 2.0,
+      "track": 2,
+      "cmds": [
+        { "name": "fade", "args": ["out", 2.0], "opts": {} }
+      ]
+    }
+  ],
+  "markers": [
+    { "name": "Awakening", "time": 0.0 },
+    { "name": "Nave", "time": 13.3 },
+    { "name": "SignOff", "time": 115.6 }
+  ],
+  "clips": [
+    { "name": "first-act", "start": 0.0, "end": 40.0, "track": 0 },
+    { "name": "climax", "start": 77.8, "end": 102.2, "track": 0 }
+  ]
+}

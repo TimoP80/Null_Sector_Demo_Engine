@@ -1,0 +1,6 @@
+{
+  "name": "diag_copy",
+  "passes": [
+    { "name": "copy" }
+  ]
+}

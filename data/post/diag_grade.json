@@ -1,0 +1,6 @@
+{
+  "name": "diag_grade",
+  "passes": [
+    { "name": "grade", "tonemap": true, "saturation": 1.06, "contrast": 1.04, "exposure": 1.0 }
+  ]
+}

@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Timeline — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">03</span> Authoring · Timeline</p>
+        <h1>Timeline Editor Backend</h1>
+        <p class="lede">A full timeline backend — tracks, events, clips and markers with transport control — that the script compiler fills automatically. Effects start and stop by themselves when events fire.</p>
+      </header>
+
+      <section>
+        <h2>Concepts</h2>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Concept</th><th>What it is</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Track</strong></td><td>A named lane with a type (<code>effect</code>, <code>camera</code>, <code>post</code>, <code>audio</code>, <code>animation</code>, <code>event</code>) and a mute flag.</td></tr>
+              <tr><td><strong>Event</strong></td><td>A scheduled command bundle with a start time, optional duration, optional repeat (<code>loopEvery</code>), and an owning clip. This is what every <code>at</code> block becomes.</td></tr>
+              <tr><td><strong>Clip</strong></td><td>A named region that groups events; offsetting the clip moves all of its events together.</td></tr>
+              <tr><td><strong>Marker</strong></td><td>A named cue point at a time — for scrubbing and rehearsal navigation.</td></tr>
+              <tr><td><strong>Keyframes</strong></td><td>Owned by the AnimationSystem; the timeline starts and stops the animations.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Transport</h2>
+        <p class="sec-sub">Everything the keyboard controls maps to these operations. All of them are scriptable (<code>speed</code>, <code>loop</code>, <code>jump</code> commands) as well as key-driven.</p>
+        <div class="grid">
+          <div class="card"><span class="glyph">▶</span><h3>play / pause / toggle</h3><p>Advance the clock; events fire as their times are crossed.</p></div>
+          <div class="card"><span class="glyph">⏭</span><h3>seek / jump</h3><p>Move to an absolute time. Events <em>do not</em> re-fire on a seek — the fire boundary re-arms so nothing replays unless genuinely re-crossed.</p></div>
+          <div class="card"><span class="glyph">↻</span><h3>loop</h3><p>Whole-show or section range looping.</p></div>
+          <div class="card"><span class="glyph">±</span><h3>speed</h3><p>Scale the clock rate (timescale ramps are great for slow-mo moments).</p></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Event firing semantics</h2>
+        <p class="sec-sub">Events stay sorted. Each frame, <code>update(dt)</code> returns every event whose time fell inside the crossed window, so each fires exactly once regardless of frame rate. Scrubbing backwards re-arms the boundary — a deliberate choice for live cueing. Fired events are handed out as stable copies via <code>fired()</code> / <code>consumeFired()</code>, so the director can safely react while the editor keeps updating.</p>
+      </section>
+
+      <section>
+        <h2>JSON format</h2>
+        <p class="sec-sub">Timelines round-trip through JSON (<code>data/timelines/*.json</code>), loaded by the asset manager's <code>timeline</code> kind. Example from the bundled <code>beat_map.json</code>:</p>
+        <div class="code" data-lang="json">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/timelines/beat_map.json</span><span class="lang">json</span></div>
+          <pre>{
+  "duration": 125.0,
+  "tracks": [
+    { "name": "visuals", "type": "effect" },
+    { "name": "camera",  "type": "camera" },
+    { "name": "post",    "type": "post" }
+  ],
+  "events": [
+    {
+      "name": "intro",
+      "time": 0.0,
+      "duration": 0.0,
+      "track": 0,
+      "cmds": [
+        { "name": "camera", "args": ["IntroCam"], "opts": { "rig": "drift", "pos": [0, 0, 2.4] } },
+        { "name": "show",   "args": ["intro"],    "opts": {} }
+      ]
+    },
+    { "name": "preset-cinematic", "time": 26.7, "track": 2,
+      "cmds": [ { "name": "post", "args": ["preset", "cinematic"], "opts": {} } ] }
+  ],
+  "markers": [
+    { "name": "Awakening", "time": 0.0 },
+    { "name": "Nave",      "time": 13.3 }
+  ],
+  "clips": [
+    { "name": "first-act", "start": 0.0, "end": 40.0, "track": 0 },
+    { "name": "climax",    "start": 77.8, "end": 102.2, "track": 0 }
+  ]
+}</pre>
+        </div>
+        <div class="callout tip">
+          <span class="ct-label">Tip</span>
+          <p>You rarely write these by hand — the script compiler produces them. But the format is public, so a timeline editor UI or a DAW export can generate a show directly.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>From script to events</h2>
+        <p class="sec-sub">The <code>ScriptEngine</code> walks the parsed script and produces:</p>
+        <ul>
+          <li>one <code>TimelineEvent</code> per top-level <code>at</code> block (absolute time);</li>
+          <li>scene-relative <code>at</code> sub-blocks offset by the scene's start time;</li>
+          <li>a <code>SceneSection</code> schedule (start/end per scene) from <code>bars</code> × BPM or explicit durations.</li>
+        </ul>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

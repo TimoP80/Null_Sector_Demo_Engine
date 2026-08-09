@@ -1,0 +1,2 @@
+# Audio sources are large; track via Git LFS
+data/neural_dust/*.wav filter=lfs diff=lfs merge=lfs -text

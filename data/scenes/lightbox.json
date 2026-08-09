@@ -1,0 +1,57 @@
+{
+  "name": "world",
+  "type": "empty",
+  "pos": [0, 0, 0],
+  "rot": [0, 0, 0, 1],
+  "scale": [1, 1, 1],
+  "children": [
+    {
+      "name": "lightrig",
+      "type": "empty",
+      "pos": [0, 2, 0],
+      "children": [
+        {
+          "name": "sun",
+          "type": "light",
+          "pos": [0, 8, 6],
+          "light": { "type": "directional", "color": [1.0, 0.92, 0.78], "intensity": 2.0, "range": 10.0, "angle": 45.0, "shadow": false }
+        },
+        {
+          "name": "fill",
+          "type": "light",
+          "pos": [4, 3, -4],
+          "light": { "type": "point", "color": [0.4, 0.6, 1.0], "intensity": 6.0, "range": 14.0 }
+        }
+      ]
+    },
+    {
+      "name": "terrain",
+      "type": "mesh",
+      "pos": [0, -0.5, 0],
+      "scale": [1, 1, 1],
+      "tags": ["ground", "lit"],
+      "mesh": { "model": "terrain.obj", "material": "chrome", "scale": 1.0, "lit": true }
+    },
+    {
+      "name": "gem",
+      "type": "mesh",
+      "pos": [2.2, 1.4, 0],
+      "scale": [0.8, 0.8, 0.8],
+      "tags": ["artifact"],
+      "mesh": { "model": "gem.obj", "material": "neon", "scale": 1.0, "lit": true }
+    },
+    {
+      "name": "halo",
+      "type": "sprite",
+      "pos": [0, 1.9, -4],
+      "scale": [5, 2.5, 1],
+      "sprite": { "tex": "ghost_logo.png", "color": [1, 1, 1, 1], "opacity": 0.55 }
+    },
+    {
+      "name": "caption",
+      "type": "text",
+      "pos": [0, 2.3, 0],
+      "text": { "text": "3D // PBR // OBJ IMPORT", "size": 26, "style": "neon", "opacity": 1.0 }
+    }
+  ]
+}

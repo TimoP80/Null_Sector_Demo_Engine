@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shadertoy Import — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">08</span> Rendering · Shadertoy Import</p>
+        <h1>Shadertoy Importer</h1>
+        <p class="lede">Drop a Shadertoy fragment shader into <code>data/shadertoy/</code>, reference it from the script, and it renders fullscreen — <code>mainImage()</code>, the <code>i*</code> uniforms, textures and even multi-pass buffers A–D just work.</p>
+      </header>
+
+      <section>
+        <h2>Uniform mapping</h2>
+        <p class="sec-sub">The importer wraps your code with desktop GLSL 330 and declares the standard Shadertoy uniforms, bound from the engine clock, audio and scene:</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Shadertoy</th><th>Engine source</th></tr></thead>
+            <tbody>
+              <tr><td><code>iResolution</code></td><td>Current render target size.</td></tr>
+              <tr><td><code>iTime</code> / <code>iTimeDelta</code></td><td>Show clock / frame delta.</td></tr>
+              <tr><td><code>iFrame</code></td><td>Frame counter (settling, temporal tricks).</td></tr>
+              <tr><td><code>iMouse</code></td><td>Cursor (driven in windowed debug; <code>(0,0,0,0)</code> in the show).</td></tr>
+              <tr><td><code>iDate</code></td><td>Wall clock, year-month-day-time.</td></tr>
+              <tr><td><code>iChannelTime[4]</code> / <code>iChannelResolution[4]</code></td><td>Per-channel time / size.</td></tr>
+              <tr><td><code>iChannel0…3</code></td><td>Textures — see channel wiring below.</td></tr>
+              <tr><td><code>texture2D</code> → <code>texture</code></td><td>ES-era helper aliased so older shaders compile unchanged.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Single pass</h2>
+        <p class="sec-sub">A file with no pass markers is a single image pass. From the script: <code>load shadertoy plasma.glsl</code> then <code>show shadertoy:plasma.glsl</code>. The effect compiles the shader, creates a fullscreen quad and binds the uniforms each frame.</p>
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/shadertoy/plasma.glsl — exercises every uniform</span><span class="lang">glsl</span></div>
+          <pre>#define TAU 6.2831853
+
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 uv = (2.0 * fragCoord - iResolution.xy) / iResolution.y;
+    float t = iTime * 0.35;
+    float q = fbm(uv * 1.6 + vec2(t, -t * 0.7));        // domain-warped plasma
+    float d = fbm(uv * 3.2 + q * 1.7 + vec2(t * 0.5, 0.0));
+
+    vec3 col = 0.5 + 0.5 * cos(TAU * (vec3(0.0, 0.33, 0.67) * 2.0 + d * 1.4 + t * 0.12));
+
+    float settle = smoothstep(0.0, 2.0, float(iFrame)); // settle first frames
+    col *= 0.35 + 0.65 * settle;
+
+    col = mix(col, col.gbr, 0.02 * sin(iDate.x * 0.0001 + d * 3.0)); // iDate drift
+
+    vec3 ch = texture(iChannel0, fragCoord / iResolution.xy).rgb;    // bound tex or black
+    col += ch * 0.18 * (0.5 + 0.5 * sin(iTime * 0.8));
+
+    vec2 q2 = fragCoord / iResolution.xy - 0.5;
+    col *= 1.0 - 0.35 * dot(q2, q2);                    // vignette
+
+    fragColor = vec4(col, 1.0);
+}</pre>
+        </div>
+      </section>
+
+      <section id="multi-pass">
+        <h2>Multi-pass &amp; buffers</h2>
+        <p class="sec-sub">Pass markers split the file: <code>// pass: common</code> (shared header code), <code>// pass: buffer_a</code> … <code>// pass: buffer_d</code>, and <code>// pass: image</code> (final composition). Buffers render in order into RGBA16F targets; the image pass composes into the HDR scene.</p>
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/shadertoy/tunnel_warp.glsl (structure)</span><span class="lang">glsl</span></div>
+          <pre>// pass: common
+float tunnel(vec2 uv, float t, vec2 c) { /* ... */ }
+
+// pass: buffer_a
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    // iChannel0 = external texture or black
+}
+
+// pass: image
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    // iChannel0 = last buffer output
+    // iChannel1 = live scene input
+}</pre>
+        </div>
+        <h4>Channel defaults</h4>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Pass</th><th>iChannel0</th><th>Others</th></tr></thead>
+            <tbody>
+              <tr><td><code>buffer_a</code></td><td>External texture, else a snapshot of the live scene</td><td>—</td></tr>
+              <tr><td><code>buffer_b…d</code></td><td>Previous buffer output</td><td>—</td></tr>
+              <tr><td><code>image</code></td><td>Last buffer (or external texture)</td><td><code>iChannel1</code> = live scene snapshot</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout note">
+          <span class="ct-label">Note</span>
+          <p>The show has no cursor, so <code>iMouse</code> stays at zero unless a debug build drives it. <code>iDate</code> comes from the wall clock. Unbound channels sample a 1×1 black texture, so channel code is always safe.</p>
+        </div>
+        <h4>Marker rules (strict)</h4>
+        <p class="sec-sub">A pass marker must be the <strong>first comment on its own line</strong>, with only whitespace before it, and its name is a single token — so prose that merely <em>mentions</em> the marker text never splits the file. These are <em>not</em> markers:</p>
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">documentation text ≠ pass markers</span><span class="lang">glsl</span></div>
+          <pre>// Single-pass sample (no `// pass:` markers = image pass).  // prose mention
+//   // pass: common   - shared helpers (no program of its own) // nested comment</pre>
+        </div>
+        <p class="sec-sub">A trailing comment on a marker line is ignored (<code>// pass: buffer_a  - renders into A</code> names the pass <code>buffer_a</code>). The <code>common</code> pass is a header-only pass: its source is prepended to every other pass, so helpers like <code>hash21()</code> or <code>warp()</code> are in scope for buffer and image passes. Content <em>before</em> the first marker is discarded — if you import a Shadertoy export whose shared code sits above the first separator, move it into an explicit <code>// pass: common</code> block. A UTF-8 BOM at the top of the file is tolerated.</p>
+      </section>
+
+      <section id="options">
+        <h2>Per-file options</h2>
+        <p class="sec-sub">A file can carry header directives that change how the importer renders it. Options use the same strict rule as pass markers (first comment on a whitespace-only line, token-exact), so prose can never trigger them.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Directive</th><th>Meaning</th><th>Default</th></tr></thead>
+            <tbody>
+              <tr><td><code>// option: renderScale 0.5</code></td><td>Render the buffer passes (buffer_a…d) at a fraction of the output resolution — <code>floor(res × scale)</code>, clamped to (0, 1]. The image pass and the live-scene snapshot stay full-res. Ideal for heavy multi-pass files whose per-pixel cost is in the buffer passes.</td><td><code>1.0</code> (full res)</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/shadertoy/tunnel_warp.glsl — half-res buffers</span><span class="lang">glsl</span></div>
+          <pre>// The buffer passes do most of the work (domain-warped fbm), so render them
+// at half resolution; the image pass + scene snapshot stay full-res.
+// option: renderScale 0.5</pre>
+        </div>
+        <div class="callout tip">
+          <span class="ct-label">Why the buffer passes only</span>
+          <p>Downsampling buffers cuts the expensive per-pixel cost (fbm, raymarching) by ~4× at 0.5, while the image pass — a cheap texture composite — still runs at full res so the final picture stays sharp. Buffer shaders receive <code>iResolution</code> matching their (scaled) target, so ray/UV math stays consistent.</p>
+          <p>Measured on the shipped <code>tunnel_warp.glsl</code> at 1600×900 (periodic GPU log line, see below): full-res <strong>≈ 2.25 ms/frame</strong> → renderScale 0.5 <strong>≈ 1.10 ms/frame</strong>, roughly <strong>2× faster</strong>. Not the full 4× of the pixel ratio, because the full-res image pass and the live-scene snapshot are identical at both scales and form the floor.</p>
+        </div>
+        <div class="callout note">
+          <span class="ct-label">Verified by the preflight</span>
+          <p><code>--check-shadertoy</code> reads each file's declared <code>renderScale</code>, confirms the effect applies it, and verifies the buffer targets are actually sized at <code>floor(res × scale)</code> — a regression (option ignored, wrong size) fails in CI, not mid-scene.</p>
+        </div>
+      </section>
+
+      <section id="gpu-timing">
+        <h2>GPU timing</h2>
+        <p class="sec-sub">Every shadertoy render is bracketed by <code>GL_TIMESTAMP</code> queries, so the effect knows its own GPU cost. The EMA is logged periodically (~every 2s at 60 fps) so you can see what the <code>renderScale</code> option — or an edit to the shader — is worth live:</p>
+        <div class="code" data-lang="log">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">stderr, every ~120 frames</span><span class="lang">log</span></div>
+          <pre>[INF][SHADERTOY] tunnel_warp.glsl: 1.10 ms/frame GPU (renderScale 0.50, buffers 800x450)
+[INF][SHADERTOY] tunnel_warp.glsl: 2.25 ms/frame GPU (renderScale 1.00, buffers 1600x900)</pre>
+        </div>
+        <p class="sec-sub">The measured time is only this effect's passes — buffers + scene snapshot + image pass — not the frame. Timestamps (not <code>GL_TIME_ELAPSED</code>) are used because several shadertoy effects can render in one frame and GL allows only one active elapsed-time query per context; a ring of query pairs retries until the GPU finishes, so samples flow whether the loop is vsync'd or running ahead of the GPU.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Tool</th><th>What you see</th></tr></thead>
+            <tbody>
+              <tr><td>Live demo</td><td><code>[SHADERTOY] &lt;file&gt;: &lt;ms&gt; ms/frame GPU (renderScale &lt;scale&gt;, buffers WxH)</code> — the real per-frame cost at your render resolution.</td></tr>
+              <tr><td><code>--check-shadertoy</code></td><td><code>[SHADERTOY-PERF]</code> lines: each file measured offscreen at 1280×720 (median of 40 frames after a 10-frame warmup, so one driver hiccup can't skew it). Scaled files also get the forced-full-res comparison: <code>full-res 0.90 ms -&gt; scale 0.50 0.58 ms (1.55x faster)</code>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout note">
+          <span class="ct-label">Reading the numbers</span>
+          <p>The check's 1280×720 offscreen times are indicative — absolute ms scale with your resolution, while the <em>ratio</em> transfers reasonably. The authoritative number is the live demo's periodic line at your real resolution. Both are informational: perf is deliberately not a pass/fail criterion (CI boxes differ too much), and a driver without timestamp queries simply prints nothing.</p>
+        </div>
+        <div class="callout tip">
+          <span class="ct-label">It's a shared timer</span>
+          <p>This timing is the engine's reusable <code>PerfTimer</code> (<code>src/engine/perftimer.hpp</code> — the <code>GL_TIMESTAMP</code> ring + EMA + profile window). The scene drivers log the same way, so every effect answers "what is this costing?":</p>
+          <pre>[INF][SCENE] cathedral.frag: 2.66 ms/frame GPU
+[INF][SCENE] neuralnet.frag: 7.43 ms/frame GPU (renderScale 0.60)
+[INF][POST] 0.80 ms/frame GPU (bloom 6 levels)</pre>
+          <p>For scripted A/B comparisons, <code>--perf-json=out.json --perf-seconds=14</code> runs the show for 14 seconds, then writes one stable sample per effect (median/mean/min/max over the recorded window + frame count) to <code>out.json</code> at exit — run the same script at two <code>renderScale</code> values and diff the <code>medianMs</code> fields.</p>
+          <p>To see the option's cost <em>over time</em> — e.g. a hot-reloaded <code>renderScale</code> edit, or how the cost sits inside the whole show — use <code>--perf-csv=out.csv --perf-seconds=26</code> instead: one tab-separated row per second per <b>active</b> effect (<code>t kind name context ms</code>) with its current EMA, plus the post stack:</p>
+          <pre>t	kind	name	context	ms
+13.00	scene	cathedral	renderScale 1.00	2.82
+14.00	scene	cathedral	renderScale 1.00	2.95
+13.00	shadertoy	tunnel_warp.glsl	renderScale 0.50	1.10
+...
+25.00	post	post	bloom 6	0.47</pre>
+          <p>Inactive effects are absent from their seconds' rows, so the file plots exactly what the show spent when — run it, tweak the option, run again, and overlay the columns.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Live reload</h2>
+        <p class="sec-sub">Edit the <code>.glsl</code> source while the demo runs and the importer re-parses and recompiles every pass immediately — the whole multi-pass pipeline rebuilds from disk.</p>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

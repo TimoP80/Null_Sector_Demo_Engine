@@ -1,0 +1,25 @@
+{
+  "name": "nd_core",
+  "passes": [
+    {
+      "name": "bloom",
+      "threshold": 1.15,
+      "intensity": 1.15
+    },
+    {
+      "name": "vignette",
+      "amount": 0.5,
+      "curve": 2.0
+    },
+    {
+      "name": "grade",
+      "tonemap": true,
+      "saturation": 1.1,
+      "contrast": 1.05,
+      "exposure": 1.0
+    },
+    {
+      "name": "fxaa"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "diag_bloom",
+  "passes": [
+    { "name": "bloom", "threshold": 1.0, "intensity": 1.3 }
+  ]
+}

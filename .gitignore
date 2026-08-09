@@ -1,0 +1,25 @@
+# --- Build outputs ---
+/build/
+*.exe
+*.obj
+*.o
+*.lib
+*.dll
+*.pdb
+*.ilk
+
+# --- IDE / editor ---
+.vs/
+.vscode/
+.idea/
+*.user
+
+# --- Tooling / runtime state ---
+imgui.ini
+.freebuff/
+.printcheck/
+
+# --- Perf / diagnostics ---
+perf*.json
+*.log
+.printcheck$pg.pdf

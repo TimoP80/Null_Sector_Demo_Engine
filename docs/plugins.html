@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plugins — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">11</span> Platform · Plugins</p>
+        <h1>Effect Plugin System</h1>
+        <p class="lede">Effects are named, registered content — the engine loop only ever sees names. New content is a class + one registration line; even a shared library can add effects at runtime.</p>
+      </header>
+
+      <section>
+        <h2>The Effect API</h2>
+        <p class="sec-sub">Every effect — built-in or plugin — derives from the base <code>Effect</code> class and implements the lifecycle:</p>
+        <div class="code" data-lang="cpp">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">class Effect</span><span class="lang">cpp</span></div>
+          <pre>class Effect {
+public:
+    virtual ~Effect() = default;
+
+    virtual void init(EffectContext&amp; ctx) = 0;     // load shaders, build targets
+    virtual void render(EffectContext&amp; ctx) = 0;   // draw into the HDR scene
+    virtual void resize(EffectContext&amp; ctx) {}     // viewport / target changes
+
+    // helpers the base class provides
+    void setTime(float t);          // show clock
+    void setAudio(const AudioUniforms&amp; u);  // bass / mid / treble / kick / beat
+};</pre>
+        </div>
+        <div class="callout note">
+          <span class="ct-label">Note</span>
+          <p>EffectContext carries everything an effect may touch: renderer, camera, shared UBO, assets, the HDR target, and the per-effect uniform map that <code>anim … effect:name.uniform:uX</code> drives. Effects never touch the timeline or scene graph — they are leaf content.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Registration</h2>
+        <p class="sec-sub">A process-wide <code>Factory&lt;Effect&gt;</code> is keyed by name. Built-ins register at boot:</p>
+        <div class="code" data-lang="cpp">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">src/app/effectreg.cpp</span><span class="lang">cpp</span></div>
+          <pre>void registerBuiltinEffects() {
+    registerEffect("intro",  [] { return std::make_unique&lt;IntroFX&gt;(); });
+    registerEffect("tunnel", [] { return std::make_unique&lt;TunnelFX&gt;(); });
+    registerEffect("cathedral", [] { return std::make_unique&lt;CathedralFX&gt;(); });
+    registerEffect("shadertoy", [] { return std::make_unique&lt;ShadertoyFX&gt;(); });
+    // … every effect in the content library, by name
+}</pre>
+        </div>
+        <p class="sec-sub" style="margin-top:16px">The demo script addresses effects purely by name — <code>show tunnel { mode 1 }</code>, <code>show shadertoy:plasma.glsl</code>. Adding a new effect to the library means the engine loop changes by zero lines.</p>
+      </section>
+
+      <section>
+        <h2>Dynamic plugins</h2>
+        <p class="sec-sub">Plugins are shared libraries (<code>.dll</code> / <code>.so</code>) dropped into <code>data/plugins/</code> (or <code>--plugin=DIR</code>). They export a single C entry point that registers into the same factory:</p>
+        <div class="code" data-lang="cpp">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">my_effect_plugin.cpp</span><span class="lang">cpp</span></div>
+          <pre>#include "framework/core/factory.hpp"
+#include "effects/base_fwd.hpp"
+
+// plugin entry point — loaded via LoadLibrary / dlopen
+extern "C" void ns_register_plugins() {
+    ns::registerEffect("spiral_stars", [] {
+        return std::make_unique&lt;SpiralStarsFX&gt;();
+    });
+}</pre>
+        </div>
+        <ul>
+          <li>The engine loads every library in the plugin dir at boot and calls <code>ns_register_plugins()</code>.</li>
+          <li>New effect names become available to scripts immediately — same name space as built-ins.</li>
+          <li>Failures are logged, not fatal: a bad plugin never takes the show down.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Built-in content library</h2>
+        <p class="sec-sub">The shipped effects are ordinary registered content — the cathedral, neuralnet, infinite machine, voxel city, ghost formation, tunnel, greetings and intro effects, plus the <code>quad</code> generic fullscreen-shader effect and the Shadertoy importer. They're in <code>src/effects/</code>, but nothing about the engine requires them to be.</p>
+        <div class="callout tip">
+          <span class="ct-label">Try it</span>
+          <p>Ready to write your own? The <a href="first-effect.html">Writing Your First Effect →</a> tutorial walks a full example from shader to scripted scene, with uniform animation.</p>
+        </div>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

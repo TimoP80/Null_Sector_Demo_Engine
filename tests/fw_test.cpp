@@ -1,0 +1,1437 @@
+// ---------------------------------------------------------------------------
+// fw_test - unit tests for the GL-free framework core.
+// Build:  cmake -S . -B build && cmake --build build --target ns_fw_tests
+// Run:    build/ns_fw_tests
+// ---------------------------------------------------------------------------
+#include "framework/anim/animation.hpp"
+#include "framework/camera/camerarig.hpp"
+#include "framework/core/json.hpp"
+#include "framework/core/log.hpp"
+#include "framework/core/value.hpp"
+#include "framework/resources/assetmanager.hpp"
+#include "framework/resources/filewatcher.hpp"
+#include "framework/scene/scenegraph.hpp"
+#include "framework/script/scriptengine.hpp"
+#include "framework/script/scriptparser.hpp"
+#include "framework/timeline/timelineeditor.hpp"
+#include "app/shadertoyparse.hpp"
+#include "engine/gputimer.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <thread>
+
+namespace ns {
+
+static int g_passed = 0;
+static int g_failed = 0;
+
+#define CHECK(cond, msg)                                                        \
+  do {                                                                          \
+    if (cond) { g_passed++; }                                                   \
+    else {                                                                      \
+      g_failed++;                                                               \
+      std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, msg);        \
+    }                                                                           \
+  } while (0)
+
+#define CHECK_NEAR(a, b, eps, msg) CHECK(std::fabs((a) - (b)) < (eps), msg)
+
+// ---------------------------------------------------------------------------
+static void testJson() {
+  const std::string src =
+      R"({
+        "title": "GHOST IN THE MACHINE",
+        "bpm": 216.0,
+        "flags": [true, false, null],
+        "nested": { "a": [1, 2, { "b": "x" }], "ok": true }
+      })";
+  const Value v = Json::parse(src);
+  CHECK(v.isObj(), "json object");
+  CHECK(v.get("title").asStr() == "GHOST IN THE MACHINE", "json string");
+  CHECK_NEAR(v.get("bpm").asNum(), 216.0, 1e-9, "json number");
+  CHECK(v.get("flags").size() == 3, "json array");
+  CHECK(v.get("flags").atIndex(0).asBool(true) == true, "json bool");
+  CHECK(v.get("flags").atIndex(1).asBool() == false, "json false");
+  CHECK(v.get("flags").atIndex(2).isNull(), "json null");
+  CHECK(v.at("nested.a.1").asNum() == 2.0, "json dot path");
+  CHECK(v.at("nested.a.2.b").asStr() == "x", "json nested dot path");
+  CHECK(v.at("missing.key").isNull(), "json missing path -> null");
+
+  // round trip
+  const std::string out = Json::serialize(v, 0);
+  const Value v2 = Json::parse(out);
+  CHECK(v2.get("title").asStr() == "GHOST IN THE MACHINE", "json round trip");
+  CHECK(v2.at("nested.a.2.b").asStr() == "x", "json round trip nested");
+
+  // errors
+  bool threw = false;
+  try { Json::parse("{ \"a\": "); } catch (const JsonError&) { threw = true; }
+  CHECK(threw, "json throws on truncated input");
+
+  // Value::toFloats
+  float f[4];
+  Value vec = Value::array();
+  vec.push(Value(1.0)); vec.push(Value(2.0)); vec.push(Value(3.0));
+  CHECK(vec.toFloats(f, 4) == 3, "toFloats count");
+  CHECK(f[2] == 3.0f, "toFloats value");
+  Value sc = Value(42.0);
+  CHECK(sc.toFloats(f, 4) == 1 && f[0] == 42.0f, "toFloats scalar");
+  Value str = Value("1,2,3");
+  CHECK(str.toFloats(f, 4) == 3 && f[1] == 2.0f, "toFloats string");
+}
+
+// ---------------------------------------------------------------------------
+static void testScriptParser() {
+  // the exact example from the request
+  const std::string src = R"(
+demo "GHOST IN THE MACHINE" {
+    bpm 216
+}
+
+scene Intro {
+    bars 60  intensity 0.12  chapter 0
+    camera IntroCam { rig drift; pos (0,0,2.4); fov (50,64); buildUp (49,58); amp 2.8; freq 0.19; handheld (0.05,0.4) }
+    show intro
+    play music
+    fade in 2
+}
+
+at 0.0
+{
+    camera IntroCam
+    show intro
+    play music
+    fade in
+}
+
+at 12.5
+{
+    load tunnel
+}
+
+at 18.0
+{
+    camera FlyThrough
+}
+
+at 25
+{
+    shader CRT
+}
+
+at 40
+{
+    transition Bloom
+}
+)";
+  const Script s = ScriptParser::parse(src, "test");
+  CHECK(s.bpm == 216.0f, "script bpm");
+  CHECK(s.title == "GHOST IN THE MACHINE", "script title");
+  CHECK(s.scenes.size() == 1, "one scene");
+  CHECK(s.scenes[0].name == "Intro", "scene name");
+  CHECK(s.scenes[0].bars == 60, "scene bars");
+  CHECK_NEAR(s.scenes[0].intensity, 0.12f, 1e-6f, "scene intensity");
+  CHECK(s.scenes[0].setup.size() == 4, "scene setup cmds");
+  CHECK(s.scenes[0].setup[0].name == "camera", "scene setup camera cmd");
+  CHECK(s.scenes[0].setup[0].s("rig") == "drift", "camera rig option");
+  CHECK(s.main.size() == 5, "five at blocks");
+  CHECK_NEAR(s.main[0].time, 0.0f, 1e-6f, "at 0.0");
+  CHECK_NEAR(s.main[3].time, 25.0f, 1e-6f, "at 25");
+  CHECK(s.main[3].cmds[0].name == "shader", "shader cmd");
+  CHECK(s.main[3].cmds[0].args[0].asStr() == "CRT", "shader arg");
+  CHECK(s.main[4].cmds[0].name == "transition", "transition cmd");
+  CHECK(s.main[4].cmds[0].args[0].asStr() == "Bloom", "transition arg");
+
+  // time forms
+  Script t;
+  const std::string src2 = R"(
+bpm 120
+at 1:05.5 { marker "one" }
+at beat 128 { marker "two" }
+at bar 32 { marker "three" }
+at 66.667 s { marker "four" }
+)";
+  const Script s2 = ScriptParser::parse(src2, "times");
+  CHECK_NEAR(s2.main[0].time, 65.5f, 1e-4f, "mm:ss time");
+  CHECK_NEAR(s2.main[1].time, 128.0f * 0.5f, 1e-4f, "beat time @120bpm");
+  CHECK_NEAR(s2.main[2].time, 32.0f * 2.0f, 1e-4f, "bar time @120bpm");
+  CHECK_NEAR(s2.main[3].time, 66.667f, 1e-3f, "seconds + s unit");
+
+  // comments + vectors
+  const std::string src3 =
+      "# header comment\n"
+      "// line comment\n"
+      "at 1 { camera C { pos (1, -2, 3.5); target (0,0,0) } } /* block */\n";
+  const Script s3 = ScriptParser::parse(src3, "comments");
+  CHECK(s3.main.size() == 1, "one at after comments");
+  CHECK(s3.main[0].cmds[0].name == "camera", "camera cmd");
+  float f[3];
+  s3.main[0].cmds[0].opts.get("pos").toFloats(f, 3);
+  CHECK(f[0] == 1.0f && f[1] == -2.0f && f[2] == 3.5f, "vector with negatives");
+
+  // errors
+  bool threw = false;
+  try { ScriptParser::parse("at { }", "bad"); } catch (const ScriptError&) { threw = true; }
+  CHECK(threw, "parser throws on missing time");
+}
+
+// ---------------------------------------------------------------------------
+// testScriptDiagnostics - the parser's error quality: every failure carries
+// filename:line:column and a "did you mean" suggestion when a known name is
+// close (a typo like `blom 0.8` says "did you mean 'bloom'?" instead of a
+// bare "unknown"). Also locks in the format-compatible forms: `tempo` as a
+// bpm alias, `beat(65)` / `bar(32)` parenthesized units, glued plural units
+// (`2bars`, `32beats`), the `visible` scene option, scene-level post
+// shorthand (`bloom 0.8` -> `post { bloom 0.8 }`) and `effect X` as an
+// alias for `show X`.
+// ---------------------------------------------------------------------------
+static void testScriptDiagnostics() {
+  // unknown demo option -> suggestion + file:line:col format
+  {
+    bool threw = false;
+    std::string msg;
+    try { ScriptParser::parse("demo \"X\" { duretion 40 }", "prod.nsd"); }
+    catch (const ScriptError& e) { threw = true; msg = e.what(); }
+    CHECK(threw, "unknown demo option throws");
+    CHECK(msg.find("prod.nsd:1:") != std::string::npos, "demo error has file:line");
+    CHECK(msg.find("did you mean 'duration'") != std::string::npos, "demo option suggestion");
+  }
+  // unknown scene property -> suggestion (the request's exact example)
+  {
+    bool threw = false;
+    std::string msg;
+    try { ScriptParser::parse("scene A { blom 0.8 }", "prod.nsd"); }
+    catch (const ScriptError& e) { threw = true; msg = e.what(); }
+    CHECK(threw, "unknown scene property throws");
+    CHECK(msg.find("did you mean 'bloom'") != std::string::npos, "scene property suggestion");
+  }
+  // unknown command -> suggestion
+  {
+    bool threw = false;
+    std::string msg;
+    try { ScriptParser::parse("at 0 { shw intro }", "prod.nsd"); }
+    catch (const ScriptError& e) { threw = true; msg = e.what(); }
+    CHECK(threw, "unknown command throws");
+    CHECK(msg.find("did you mean 'show'") != std::string::npos, "command suggestion");
+  }
+  // unknown interpolator -> suggestion
+  {
+    bool threw = false;
+    std::string msg;
+    try { ScriptParser::parse("at 0 { anim x camera.fov smoth { 0 50; 4 60 } }", "prod.nsd"); }
+    catch (const ScriptError& e) { threw = true; msg = e.what(); }
+    CHECK(threw, "unknown interpolator throws");
+    CHECK(msg.find("did you mean 'smooth'") != std::string::npos, "interp suggestion");
+  }
+  // unknown rig -> suggestion (a camera command lives inside a scene/at block)
+  {
+    bool threw = false;
+    std::string msg;
+    try { ScriptParser::parse("at 0 { camera C { rig drfit } }", "prod.nsd"); }
+    catch (const ScriptError& e) { threw = true; msg = e.what(); }
+    CHECK(threw, "unknown rig throws");
+    CHECK(msg.find("did you mean 'drift'") != std::string::npos, "rig suggestion");
+  }
+  // syntax error carries line + column
+  {
+    bool threw = false;
+    std::string msg;
+    try { ScriptParser::parse("at { }", "prod.nsd"); }
+    catch (const ScriptError& e) { threw = true; msg = e.what(); }
+    CHECK(threw && msg.find("prod.nsd:1:4") != std::string::npos, "syntax error has file:line:col");
+  }
+
+  // format-compatible forms parse into the right AST
+  {
+    const std::string src = R"(
+demo "EXAMPLE" { tempo 140; duration 2bars }
+scene A { bars 4  visible false
+    bloom 0.8
+    effect intro
+}
+at beat(65) { marker "m1" }
+at 32beats { marker "m2" }
+)";
+    const Script s = ScriptParser::parse(src, "forms");
+    CHECK_NEAR(s.bpm, 140.0f, 1e-6f, "tempo alias sets bpm");
+    // bar-unit fields resolve at the declared tempo regardless of field order:
+    // `duration` written ABOVE `tempo` must still resolve at 140, not the
+    // 216 default (the header is pre-scanned for bpm before parsing values)
+    {
+      const Script s2 = ScriptParser::parse(
+          "demo \"X\" { duration 2bars; tempo 140 }", "order");
+      CHECK_NEAR(s2.duration, 2.0f * 4.0f * (60.0f / 140.0f), 1e-3f,
+                 "duration-before-tempo resolves at the declared bpm");
+    }
+    CHECK_NEAR(s.duration, 2.0f * 4.0f * (60.0f / 140.0f), 1e-3f, "duration 2bars resolves");
+    CHECK(s.scenes[0].visible == false, "scene visible option");
+    // bloom 0.8 -> a post command carrying the bloom option
+    bool hasPostBloom = false;
+    for (const auto& c : s.scenes[0].setup)
+      if (c.name == "post" && c.opts.get("bloom").asFloat() == 0.8f) hasPostBloom = true;
+    CHECK(hasPostBloom, "scene-level bloom shorthand becomes a post command");
+    // effect intro -> show intro alias
+    bool hasShowIntro = false;
+    for (const auto& c : s.scenes[0].setup)
+      if (c.name == "show" && !c.args.empty() && c.args[0].asStr() == "intro") hasShowIntro = true;
+    CHECK(hasShowIntro, "effect X alias becomes show X");
+    CHECK_NEAR(s.main[0].time, 65.0f * (60.0f / 140.0f), 1e-3f, "beat(65) parenthesized form");
+    CHECK_NEAR(s.main[1].time, 32.0f * (60.0f / 140.0f), 1e-3f, "32beats glued plural unit");
+  }
+}
+
+// ---------------------------------------------------------------------------
+static void testScriptEngineAndTimeline() {
+  const std::string src = R"(
+bpm 216
+scene A { bars 8  intensity 0.4  chapter 1
+    camera ACam { rig static; pos (0,0,2) }
+    show intro
+    at 2 { marker "sub" }
+}
+scene B { bars 4  intensity 0.9  chapter 3
+    show tunnel
+}
+at 0 { show A }
+at 18.0 { show B; transition fade 1 }
+)";
+  ScriptEngine eng;
+  CHECK(eng.loadText(src, "eng"), "script engine load");
+  TimelineEditor editor;
+  eng.build(editor);
+  const auto& secs = eng.sections();
+  CHECK(secs.size() == 2, "two sections");
+  CHECK(secs[0].name == "A", "section 0 name");
+  CHECK_NEAR(secs[0].start, 0.0f, 1e-4f, "section 0 start");
+  CHECK_NEAR(secs[0].duration, 8.0f * 4.0f * (60.0f / 216.0f), 1e-3f, "section 0 duration in bars");
+  CHECK_NEAR(secs[1].start, 18.0f, 1e-4f, "section 1 start");
+  CHECK_NEAR(secs[1].intensity, 0.9f, 1e-5f, "section 1 intensity");
+
+  // events: 2 top-level at + scene A setup (at 0) + scene A sub (at 2) + scene B setup (at 18)
+  CHECK(editor.events.size() == 5, "event count");
+  CHECK_NEAR(editor.duration, 18.0f + 4.0f * 4.0f * (60.0f / 216.0f), 1e-3f, "timeline duration");
+
+  // transport
+  editor.play();
+  int fired = 0;
+  editor.update(1.0f);
+  fired += (int)editor.fired().size();
+  editor.consumeFired();
+  CHECK(fired >= 2, "events fired at t=0 (top at + scene setup)");
+  editor.update(1.0f);  // t=2 -> scene A sub fires
+  bool sawSub = false;
+  for (const auto& e : editor.fired()) {
+    for (const auto& c : e.cmds) if (c.name == "marker") sawSub = true;
+  }
+  CHECK(sawSub, "scene-relative sub-block fired at scene start + 2");
+  editor.consumeFired();
+
+  // pause
+  editor.pause();
+  editor.update(5.0f);
+  CHECK(editor.fired().empty(), "no events while paused");
+
+  // seek re-arms
+  editor.seek(10.0f);
+  editor.play();
+  editor.update(5.0f);  // crosses 15, no events between 10 and 15
+  CHECK(editor.fired().empty(), "seek does not refire past events");
+  editor.consumeFired();
+  editor.update(4.0f);  // crosses 18 -> transition + scene B setup
+  bool sawTrans = false;
+  for (const auto& e : editor.fired())
+    for (const auto& c : e.cmds) if (c.name == "transition") sawTrans = true;
+  CHECK(sawTrans, "event at 18 fired after seek");
+
+  // looping
+  editor.consumeFired();
+  editor.setLoop(true, 0, 18.0f);
+  editor.seek(17.0f);
+  editor.play();
+  editor.update(2.0f);  // wraps to 1.0, crossing 0 -> refires t=0 events
+  int n0 = 0;
+  for (const auto& e : editor.fired()) if (e.time <= 0.001f) n0++;
+  CHECK(n0 >= 2, "loop wrap refires events at 0");
+  editor.consumeFired();
+
+  // fireWindow: the seek catch-up primitive (what DemoApp::seek uses so a
+  // scrub establishes the scene at the target). Fires exactly the events in
+  // (lo, hi] in order, without moving the clock or the fire boundary.
+  editor.fireWindow(10.0f, 30.0f);  // forward window: crosses the 18s event
+  bool sawFireTrans = false;
+  int fireWindowN = 0;
+  for (const auto& e : editor.fired()) {
+    if (e.time > 10.001f && e.time <= 30.0f) fireWindowN++;
+    for (const auto& c : e.cmds)
+      if (c.name == "transition") sawFireTrans = true;
+  }
+  CHECK(fireWindowN >= 1 && sawFireTrans, "fireWindow fires the crossed 18s event");
+  CHECK_NEAR(editor.time, 1.0f, 1e-4f, "fireWindow does not move the clock");
+  editor.consumeFired();
+  editor.fireWindow(10.0f, 5.0f);  // inverted window (lo > hi) -> nothing
+  CHECK(editor.fired().empty(), "fireWindow inverted window fires nothing");
+  editor.consumeFired();
+
+  // serialization round trip
+  const Value j = editor.toJson();
+  TimelineEditor editor2;
+  editor2.fromJson(j);
+  CHECK(editor2.events.size() == editor.events.size(), "timeline json round trip");
+}
+
+// ---------------------------------------------------------------------------
+static void testAnimation() {
+  // interpolators
+  CHECK_NEAR(AnimationSystem::interpValue(Interp::Linear, 0.5f, 0, 10), 5.0f, 1e-5f, "linear mid");
+  CHECK_NEAR(AnimationSystem::interpValue(Interp::Linear, 0.0f, 3, 10), 3.0f, 1e-5f, "linear start");
+  CHECK_NEAR(AnimationSystem::interpValue(Interp::Linear, 1.0f, 3, 10), 10.0f, 1e-5f, "linear end");
+  CHECK_NEAR(AnimationSystem::interpValue(Interp::Smooth, 0.5f, 0, 1), 0.5f, 1e-5f, "smooth mid");
+  CHECK_NEAR(AnimationSystem::interpValue(Interp::EaseOut, 0.0f, 0, 1), 0.0f, 1e-5f, "ease-out start");
+  CHECK_NEAR(AnimationSystem::interpValue(Interp::EaseOut, 1.0f, 0, 1), 1.0f, 1e-5f, "ease-out end");
+  const float b = AnimationSystem::interpValue(Interp::Bounce, 0.5f, 0, 1);
+  CHECK(b >= 0.0f && b <= 1.0f, "bounce stays in range");
+  const float el = AnimationSystem::interpValue(Interp::Elastic, 0.5f, 0, 1);
+  CHECK(el >= 0.0f && el <= 1.2f, "elastic stays in range");
+  // elastic overshoots (standard easeOutElastic peaks above 1 mid-tween)
+  const float el2 = AnimationSystem::interpValue(Interp::Elastic, 0.2f, 0, 1);
+  CHECK(el2 > 1.0f, "elastic overshoots above 1");
+  CHECK_NEAR(AnimationSystem::interpValue(Interp::Elastic, 0.0f, 0, 1), 0.0f, 1e-5f, "elastic start");
+  CHECK_NEAR(AnimationSystem::interpValue(Interp::Elastic, 1.0f, 0, 1), 1.0f, 1e-5f, "elastic end");
+
+  // channel sampling
+  AnimationSystem sys;
+  auto anim = std::make_shared<Animation>();
+  anim->name = "cameraIntro";
+  anim->duration = 16.0f;
+  AnimChannel ch;
+  ch.target = "camera";
+  ch.property = "fov";
+  ch.keys = {
+    {0.0f, Value(50.0), Interp::Linear},
+    {8.0f, Value(64.0), Interp::Smooth},
+    {16.0f, Value(58.0), Interp::Elastic},
+  };
+  anim->channels.push_back(ch);
+  sys.add(anim);
+
+  float out[4];
+  int n = AnimationSystem::sampleChannel(ch, 0.0f, out, 4);
+  CHECK(n == 1 && out[0] == 50.0f, "channel sample start");
+  n = AnimationSystem::sampleChannel(ch, 16.0f, out, 4);
+  CHECK(n == 1 && out[0] == 58.0f, "channel sample end");
+  n = AnimationSystem::sampleChannel(ch, 8.0f, out, 4);
+  CHECK(n == 1 && out[0] == 64.0f, "channel sample mid");
+  n = AnimationSystem::sampleChannel(ch, 4.0f, out, 4);
+  CHECK(n == 1 && out[0] > 50.0f && out[0] < 64.0f, "channel sample interpolates");
+  n = AnimationSystem::sampleChannel(ch, -5.0f, out, 4);
+  CHECK(out[0] == 50.0f, "channel clamps before first key");
+  n = AnimationSystem::sampleChannel(ch, 99.0f, out, 4);
+  CHECK(out[0] == 58.0f, "channel clamps after last key");
+
+  // vector channel
+  AnimChannel vc;
+  vc.target = "camera";
+  vc.property = "pos";
+  V3 va0 = {0, 0, 2}, vb0 = {1, 1, 2};
+  Value va = Value::array(); va.push(Value(0.0)); va.push(Value(0.0)); va.push(Value(2.0));
+  Value vb = Value::array(); vb.push(Value(1.0)); vb.push(Value(1.0)); vb.push(Value(2.0));
+  (void)va0; (void)vb0;
+  vc.keys = {{0.0f, va, Interp::Linear}, {1.0f, vb, Interp::Linear}};
+  n = AnimationSystem::sampleChannel(vc, 0.5f, out, 4);
+  CHECK(n == 3 && out[0] == 0.5f && out[1] == 0.5f && out[2] == 2.0f, "vector interpolation");
+
+  // runtime play + samples
+  sys.play("cameraIntro");
+  sys.update(4.0f);
+  const auto& samples = sys.samples();
+  bool sawFov = false;
+  for (const auto& s : samples) if (s.target == "camera" && s.property == "fov") sawFov = true;
+  CHECK(sawFov, "runtime samples contain camera.fov");
+  sys.consumeSamples();
+  sys.update(20.0f);  // past the end -> retires (non-looping)
+  CHECK(!sys.isPlaying("cameraIntro"), "finished animation retires");
+  sys.stopAll();
+
+  // parse interp names
+  CHECK(parseInterp("bounce") == Interp::Bounce, "parse interp bounce");
+  CHECK(parseInterp("wat") == Interp::Linear, "unknown interp -> linear");
+}
+
+// ---------------------------------------------------------------------------
+static void testSceneGraph() {
+  SceneGraph g;
+  SceneNode* cam = g.addNode("cam1", NodeType::Camera, CamData{62.0f, 0.05f, 400.0f, {0, 0, 0}, "drift"});
+  CHECK(cam != nullptr, "add camera node");
+  CHECK(g.find("cam1") == cam, "find by name");
+
+  // hierarchy + world transform
+  SceneNode* parent = g.addNode("p", NodeType::Empty);
+  SceneNode* child = g.addNode("c", NodeType::Sprite, SpriteData{}, parent);
+  parent->setPos({1, 2, 3});
+  child->setPos({4, 5, 6});
+  g.update();
+  CHECK_NEAR(child->world[12], 5.0f, 1e-4f, "world translation x (parent + child)");
+  CHECK_NEAR(child->world[13], 7.0f, 1e-4f, "world translation y");
+  CHECK_NEAR(child->world[14], 9.0f, 1e-4f, "world translation z");
+
+  // scale propagates: world.x = parent.pos.x + parent.scale.x * child.pos.x
+  parent->setScale(2.0f);
+  g.update();
+  CHECK_NEAR(child->world[12], 1.0f + 2.0f * 4.0f, 1e-4f, "scaled parent world pos");
+
+  // visibility / enabled
+  CHECK(child->isActive(), "child active");
+  parent->enabled = false;
+  CHECK(!child->isActive(), "disabled parent deactivates child");
+  parent->enabled = true;
+  child->visible = false;
+  CHECK(!child->isActive(), "invisible child inactive");
+
+  // tags
+  parent->tags.push_back("solid");
+  auto tagged = g.findTag("solid");
+  CHECK(tagged.size() == 1 && tagged[0] == parent, "find by tag");
+
+  // node types
+  SceneNode* l = g.addNode("key", NodeType::Light, LightData{"point", {1, 0, 0}, 3.0f, 10, 45, false});
+  CHECK(l->asLight() != nullptr, "light payload accessor");
+  CHECK(l->asCamera() == nullptr, "wrong accessor returns null");
+  CHECK(l->asLight()->intensity == 3.0f, "light intensity");
+
+  // serialization round trip
+  const Value j = g.toJson();
+  SceneGraph g2;
+  g2.fromJson(j);
+  SceneNode* c2 = g2.find("c");
+  CHECK(c2 != nullptr, "scene json round trip finds child");
+  CHECK(c2->type == NodeType::Sprite, "scene json round trip type");
+  SceneNode* l2 = g2.find("key");
+  CHECK(l2->asLight() && l2->asLight()->color[0] == 1.0f, "scene json round trip payload");
+  g2.update();
+  CHECK_NEAR(c2->world[12], 9.0f, 1e-3f, "restored world matrix");
+}
+
+// ---------------------------------------------------------------------------
+static void testCameraRig() {
+  // static rig
+  CameraRig st;
+  st.type = "static";
+  st.pos = {1, 2, 3};
+  st.target = {0, 0, 0};
+  st.fov = 55.0f;
+  const RigSample s = st.sample(10.0f, 5.0f);
+  CHECK(s.pos[0] == 1.0f && s.pos[1] == 2.0f && s.pos[2] == 3.0f, "static pos");
+  CHECK_NEAR(s.fovDeg, 55.0f, 1e-5f, "static fov");
+
+  // fly rig moves forward with local time
+  CameraRig fly;
+  fly.type = "fly";
+  fly.pos = {0, 0, 14};
+  fly.speed = 16.0f;
+  const RigSample f0 = fly.sample(5.0f, 0.0f);
+  const RigSample f1 = fly.sample(5.0f, 2.0f);
+  CHECK_NEAR(f0.pos[2], 14.0f, 1e-4f, "fly start z");
+  CHECK_NEAR(f1.pos[2], 14.0f - 32.0f, 1e-4f, "fly z after 2s");
+
+  // orbit stays on a (slowly breathing) circle around radius `radius`
+  CameraRig orb;
+  orb.type = "orbit";
+  orb.radius = 4.0f;
+  orb.pos = {0, 1.5f, 0};
+  orb.omega = 1.0f;
+  const RigSample o0 = orb.sample(0, 0.0f);
+  const RigSample o1 = orb.sample(0, 3.14159265f / 2.0f);
+  const float r0 = std::sqrt(o0.pos[0] * o0.pos[0] + o0.pos[2] * o0.pos[2]);
+  CHECK_NEAR(r0, 4.0f, 1e-3f, "orbit radius at 0");
+  CHECK(std::fabs(o1.pos[0]) < 1e-3f, "orbit x at pi/2 (top of the circle)");
+  const float r1 = std::sqrt(o1.pos[0] * o1.pos[0] + o1.pos[2] * o1.pos[2]);
+  CHECK(r1 > 3.5f && r1 < 4.6f, "orbit stays near radius 4 with drift");
+
+  // fromCmd parsing
+  Cmd c;
+  c.name = "camera";
+  c.opts.set("rig") = Value("drift");
+  c.opts.set("pos") = Value("(0,0,2.4)");  // string form handled by toFloats
+  c.opts.set("fov") = Value("(50,64)");
+  c.opts.set("buildUp") = Value("(49,58)");
+  c.opts.set("amp") = Value(2.8);
+  auto rig = CameraRig::fromCmd(c);
+  CHECK(rig->type == "drift", "rig type from cmd");
+  CHECK(rig->pos[2] == 2.4f, "rig pos from cmd");
+  CHECK_NEAR(rig->fov, 64.0f, 1e-5f, "rig fov target");
+  CHECK_NEAR(rig->fovBase, 50.0f, 1e-5f, "rig fov base");
+  CHECK_NEAR(rig->buildUpStart, 49.0f, 1e-5f, "rig buildUp start");
+  const RigSample r0s = rig->sample(49.0f, 0.0f);
+  const RigSample r1s = rig->sample(58.0f, 0.0f);
+  CHECK_NEAR(r0s.fovDeg, 50.0f, 1e-3f, "fov ramp at start");
+  CHECK_NEAR(r1s.fovDeg, 64.0f, 1e-3f, "fov ramp at end");
+}
+
+// ---------------------------------------------------------------------------
+static void testAssetManager() {
+  AssetManager am;
+  int loads = 0, frees = 0;
+  am.registerKind(
+      "texture",
+      [&](const std::string& p) { loads++; return (void*)(uintptr_t)(loads * 100 + 7); },
+      [&](void* h) { (void)h; frees++; },
+      [&](const std::string& p, void*& h) {
+        (void)p;
+        h = (void*)(uintptr_t)999;
+        return true;
+      });
+
+  void* a = am.acquire("a.png", "texture");
+  void* b = am.acquire("a.png", "texture");  // cached
+  CHECK(a == b, "asset cache returns same handle");
+  CHECK(loads == 1, "asset loaded once");
+  CHECK(am.find("a.png", "texture")->refs == 2, "refcount 2");
+
+  am.release("a.png", "texture");
+  CHECK(am.find("a.png", "texture")->refs == 1, "refcount 1 after release");
+  am.release("a.png", "texture");
+  CHECK(am.find("a.png", "texture") == nullptr, "asset freed at zero refs");
+  CHECK(frees == 1, "free called once");
+
+  // reload
+  (void)am.acquire("a.png", "texture");
+  const uint64_t v0 = am.version("a.png", "texture");
+  am.markDirty("a.png");
+  CHECK(am.anyDirty(), "asset dirty after markDirty");
+  const int n = am.reloadDirty();
+  CHECK(n == 1, "one asset reloaded");
+  CHECK(am.version("a.png", "texture") == v0 + 1, "version bumped after reload");
+  CHECK(!am.anyDirty(), "clean after reload");
+
+  // unknown kind
+  CHECK(am.acquire("x.txt", "nope") == nullptr, "unknown kind returns null");
+  am.clear();
+
+  // a failed load is NOT terminal: markDirty + reloadDirty retries the loader
+  // (this is how a texture/model dropped in after the show started gets
+  // picked up without a restart)
+  {
+    AssetManager am2;
+    int calls = 0;
+    am2.registerKind(
+        "tex",
+        [&](const std::string&) -> void* { return ++calls >= 2 ? (void*)(uintptr_t)777 : nullptr; },
+        [](void*) {}, nullptr);
+    CHECK(am2.acquire("b.png", "tex") == nullptr, "first load fails -> null handle");
+    CHECK(calls == 1, "loader ran once on the failed acquire");
+    am2.markDirty("b.png");
+    const int n = am2.reloadDirty();
+    CHECK(n == 1, "failed asset retried + loaded on reloadDirty");
+    AssetInfo* info = am2.find("b.png", "tex");
+    CHECK(info && info->loaded, "retried asset is loaded");
+    CHECK(info && info->handle == (void*)(uintptr_t)777, "retried asset handle set");
+    am2.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
+static void testFileWatcher() {
+  const std::string dir = "fw_test_tmp";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::filesystem::create_directories(dir, ec);
+
+  const std::string file = dir + "/a.txt";
+  {
+    std::ofstream f(file);
+    f << "one";
+  }
+  int changed = 0;
+  FileWatcher w([&](const std::string&) { changed++; });
+  w.add(dir);
+  w.poll();  // baseline (initial scan does not fire)
+
+  // rewrite with a different SIZE (mtime granularity varies by filesystem)
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  {
+    std::ofstream f(file);
+    f << "two-two-two-two";
+  }
+  const int n = w.poll();
+  CHECK(n >= 1, "watcher detected a change");
+  CHECK(changed >= 1, "watcher callback fired");
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  CHECK(w.poll() == 0, "no spurious changes");
+
+  // a deleted file is REPORTED as a change (a missing dependency must fail
+  // loudly, not silently drop off the watch set), and a file recreated after
+  // deletion re-enters the watch set and is reported again - this is what
+  // lets a deleted-then-restored shader/texture reload live
+  std::filesystem::remove(file, ec);
+  const int nDel = w.poll();
+  CHECK(nDel >= 1, "watcher reports a deleted file");
+  CHECK(changed >= 2, "watcher callback fired for the deletion");
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  CHECK(w.poll() == 0, "no spam while the file stays deleted");
+  {
+    std::ofstream f(file);
+    f << "recreated";
+  }
+  const int nRe = w.poll();
+  CHECK(nRe >= 1, "recreated file re-enters the watch set");
+  CHECK(changed >= 3, "watcher callback fired for the recreation");
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  CHECK(w.poll() == 0, "no spurious changes after recreation");
+
+  // markDirty through the asset pipeline
+  std::filesystem::remove_all(dir, ec);
+}
+
+// ---------------------------------------------------------------------------
+// testLiveReloadChain - GL-free proof of the live-reload loop exactly as the
+// app wires it:
+//
+//     FileWatcher::poll()  ->  changed()  ->  AssetManager::markDirty()  ->  reloadDirty()
+//
+// The loader treats the file's CONTENT as the opaque handle (a heap string),
+// so the tests can assert that the fixed content is what actually goes live -
+// no restart, no GL. The acquire paths are "/"-concatenated like the app's
+// dataDir() + "/textures/...", while the watcher reports native (backslash
+// on Windows) paths: the AssetManager must canonicalize so they match.
+// ---------------------------------------------------------------------------
+static std::function<void*(const std::string&)> contentLoader() {
+  return [](const std::string& path) -> void* {
+    std::ifstream f(path);
+    if (!f) return nullptr;
+    const std::string c((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (c.find("BROKEN") != std::string::npos) return nullptr;  // loader rejects garbage
+    return new std::string(c);
+  };
+}
+
+static std::function<bool(const std::string&, void*&)> contentReloadFn() {
+  return [](const std::string& path, void*& handle) -> bool {
+    std::ifstream f(path);
+    if (!f) return false;
+    const std::string c((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (c.find("BROKEN") != std::string::npos) return false;
+    delete static_cast<std::string*>(handle);
+    handle = new std::string(c);
+    return true;
+  };
+}
+
+static std::function<void(void*)> contentFree() {
+  return [](void* h) { delete static_cast<std::string*>(h); };
+}
+
+// mirror DemoApp::update: poll the watcher, mark every reported file dirty,
+// then run the deferred reload pass. The real pollLiveReload() runs
+// reloadDirty() whenever the watcher reported anything (it is a no-op when
+// nothing is dirty), so it is called unconditionally here too.
+static int pumpReload(FileWatcher& w, AssetManager& am) {
+  const int n = w.poll();
+  if (n > 0) {
+    for (const auto& f : w.changed()) am.markDirty(f);
+  }
+  am.reloadDirty();
+  return n;
+}
+
+static void testLiveReloadChain() {
+  const std::string root = "fw_live_tmp";
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+
+  // --- 1. dropped in late: acquire fails, file fixed on disk, picked up live
+  {
+    const std::string dir = root + "/late";
+    std::filesystem::create_directories(dir, ec);
+    const std::string file = dir + "/tex.png";  // "/" concatenation, like the app
+    {
+      std::ofstream f(file);
+      f << "BROKEN-LATE-MISSING";
+    }
+
+    AssetManager am;
+    am.registerKind("texture", contentLoader(), contentFree());
+    FileWatcher w;
+    w.add(dir);
+    w.poll();  // baseline (initial scan does not fire)
+
+    CHECK(am.acquire(file, "texture") == nullptr, "acquire fails while the file is broken");
+    AssetInfo* info = am.find(file, "texture");
+    CHECK(info && !info->loaded, "failed acquire registered as unloaded");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    {
+      std::ofstream f(file);
+      f << "TEXTURE-OK-42";
+    }
+    CHECK(pumpReload(w, am) >= 1, "watcher reported the fix");
+    info = am.find(file, "texture");
+    CHECK(info && info->loaded, "fixed file picked up WITHOUT restart");
+    CHECK(info && info->handle && *static_cast<std::string*>(info->handle) == "TEXTURE-OK-42",
+          "handle carries the fixed content");
+    CHECK(info && info->version == 1, "retried load bumped version to 1");
+    CHECK(info && info->error.empty(), "retry error cleared on success");
+    am.clear();
+  }
+
+  // --- 2. live edit: loaded asset, source edited, handle swapped in place
+  {
+    const std::string dir = root + "/edit";
+    std::filesystem::create_directories(dir, ec);
+    const std::string file = dir + "/tex.png";
+    {
+      std::ofstream f(file);
+      f << "TEXTURE-V1";
+    }
+
+    AssetManager am;
+    am.registerKind("texture", contentLoader(), contentFree(), contentReloadFn());
+    FileWatcher w;
+    w.add(dir);
+    w.poll();  // baseline
+
+    void* h1 = am.acquire(file, "texture");
+    CHECK(h1 && *static_cast<std::string*>(h1) == "TEXTURE-V1", "initial load");
+    const uint64_t v0 = am.version(file, "texture");
+    CHECK(v0 == 1, "initial version 1");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    {
+      std::ofstream f(file);
+      f << "TEXTURE-V2-EDITED";
+    }
+    CHECK(pumpReload(w, am) >= 1, "watcher reported the edit");
+    AssetInfo* info = am.find(file, "texture");
+    CHECK(info && info->version == v0 + 1, "version bumped after live edit");
+    CHECK(info && info->handle && *static_cast<std::string*>(info->handle) == "TEXTURE-V2-EDITED",
+          "handle swapped to the edited content");
+    CHECK(info && info->error.empty(), "reload error cleared on success");
+    am.clear();
+  }
+
+  // --- 3. delete + restore: previous version kept while missing (no spam),
+  //        restored file comes back live
+  {
+    const std::string dir = root + "/gone";
+    std::filesystem::create_directories(dir, ec);
+    const std::string file = dir + "/tex.png";
+    {
+      std::ofstream f(file);
+      f << "TEXTURE-V3";
+    }
+
+    AssetManager am;
+    am.registerKind("texture", contentLoader(), contentFree(), contentReloadFn());
+    FileWatcher w;
+    w.add(dir);
+    w.poll();  // baseline
+
+    void* h3 = am.acquire(file, "texture");
+    CHECK(h3 && *static_cast<std::string*>(h3) == "TEXTURE-V3", "initial load v3");
+
+    std::filesystem::remove(file, ec);
+    CHECK(pumpReload(w, am) >= 1, "deletion reported by the watcher");
+    AssetInfo* info = am.find(file, "texture");
+    CHECK(info && info->loaded, "asset stays loaded while the source is missing");
+    CHECK(info && info->handle && *static_cast<std::string*>(info->handle) == "TEXTURE-V3",
+          "previous version kept");
+    CHECK(info && info->version == 1, "version unchanged while missing");
+    CHECK(info && !info->error.empty(), "failed reload records an informative error");
+    CHECK(pumpReload(w, am) == 0, "no spam while the file stays missing");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    {
+      std::ofstream f(file);
+      f << "TEXTURE-V4-RESTORED";
+    }
+    CHECK(pumpReload(w, am) >= 1, "restored file reported again");
+    info = am.find(file, "texture");
+    CHECK(info && info->version == 2, "restore bumped the version");
+    CHECK(info && info->handle && *static_cast<std::string*>(info->handle) == "TEXTURE-V4-RESTORED",
+          "restored content is live");
+    CHECK(info && info->error.empty(), "restore error cleared - full cycle recovered");
+    am.clear();
+  }
+
+  std::filesystem::remove_all(root, ec);
+}
+
+// ---------------------------------------------------------------------------
+static void testValueStrings() {
+  Value o = Value::object();
+  o.set("a") = Value("x");
+  CHECK(o.toString().find("\"a\"") != std::string::npos, "object toString");
+  CHECK(o.get("b").isNull(), "missing key returns null");
+  o.set("b") = Value(5.0);
+  CHECK(o.get("b").asNum() == 5.0, "set inserts");
+}
+
+// ---------------------------------------------------------------------------
+// testShadertoyParser - the Shadertoy importer's pass splitter is GL-free and
+// must never misfire: a false `// pass:` marker (prose mention, nested
+// comment) or broken line-end arithmetic used to truncate the pass source
+// (single-pass files compiled from mid-comment -> "unexpected ==" cascades)
+// or throw std::out_of_range ("invalid string position" on multi-pass files).
+// ---------------------------------------------------------------------------
+static void testShadertoyParser() {
+  // --- prose that merely MENTIONS "// pass:" must not split the file
+  {
+    const std::string src =
+        "// header comment (no `// pass:` markers = image pass).\n"
+        "float hash21(vec2 p) { return fract(p.x); }\n"
+        "void mainImage(out vec4 o, in vec2 f) { o = vec4(hash21(f)); }\n";
+    const auto passes = splitShadertoyPasses(src);
+    CHECK(passes.size() == 1, "prose mention does not create a marker");
+    CHECK(passes.size() == 1 && passes[0].name == "image", "prose mention -> single image pass");
+    CHECK(passes.size() == 1 && passes[0].src.find("mainImage") != std::string::npos,
+          "prose mention keeps the whole body");
+  }
+
+  // --- nested "//   // pass: x" descriptions must not split the file
+  {
+    const std::string src =
+        "//   // pass: common    - shared helpers (no program of its own)\n"
+        "//   // pass: buffer_a  - renders into buffer A\n"
+        "// pass: common\n"
+        "float h(vec2 p) { return p.x; }\n"
+        "// pass: image\n"
+        "void mainImage(out vec4 o, in vec2 f) { o = vec4(h(f)); }\n";
+    const auto passes = splitShadertoyPasses(src);
+    CHECK(passes.size() == 2, "nested mentions ignored; 2 real markers");
+    CHECK(passes.size() == 2 && passes[0].name == "common", "first real pass is common");
+    CHECK(passes.size() == 2 && passes[1].name == "image", "second real pass is image");
+  }
+
+  // --- marker name is a single token: trailing comment text is dropped
+  {
+    const std::string src =
+        "// pass: buffer_a   - renders into the RGBA16F buffer A target\n"
+        "void mainImage(out vec4 o, in vec2 f) { o = vec4(1.0); }\n";
+    const auto passes = splitShadertoyPasses(src);
+    CHECK(passes.size() == 1 && passes[0].name == "buffer_a", "trailing marker text dropped");
+  }
+
+  // --- indented markers still work; content before the first marker is dropped
+  {
+    const std::string src =
+        "// dropped header prose\n"
+        "   // pass: common\n"
+        "float h(vec2 p) { return p.x; }\n"
+        "   // pass: image\n"
+        "void mainImage(out vec4 o, in vec2 f) { o = vec4(h(f)); }\n";
+    const auto passes = splitShadertoyPasses(src);
+    CHECK(passes.size() == 2, "indented markers split");
+    CHECK(passes.size() == 2 && passes[0].src.find("float h") != std::string::npos,
+          "pre-marker prose dropped, common body kept");
+  }
+
+  // --- CRLF line endings are handled
+  {
+    const std::string src =
+        "// pass: common\r\n"
+        "float h(vec2 p) { return p.x; }\r\n"
+        "// pass: image\r\n"
+        "void mainImage(out vec4 o, in vec2 f) { o = vec4(h(f)); }\r\n";
+    const auto passes = splitShadertoyPasses(src);
+    CHECK(passes.size() == 2, "CRLF markers split");
+    CHECK(passes.size() == 2 && passes[1].src.find("// pass:") == std::string::npos,
+          "CRLF marker line excluded from the pass source");
+  }
+
+  // --- marker at EOF without a trailing newline must not throw or truncate
+  {
+    const std::string src =
+        "// pass: buffer_a\n"
+        "void mainImage(out vec4 o, in vec2 f) { o = vec4(1.0); }\n"
+        "// pass: image";  // no trailing newline
+    const auto passes = splitShadertoyPasses(src);
+    CHECK(passes.size() == 1, "EOF marker without content: no throw, empty pass dropped");
+    CHECK(passes.size() == 1 && passes[0].name == "buffer_a", "EOF marker pass dropped cleanly");
+  }
+
+  // --- empty / whitespace-only content is a single (empty) image pass
+  {
+    const auto passes = splitShadertoyPasses("   \n\n");
+    CHECK(passes.size() == 1 && passes[0].name == "image", "whitespace-only -> image pass");
+  }
+
+  // --- marker on the FIRST line of the file works
+  {
+    const std::string src =
+        "// pass: image\n"
+        "void mainImage(out vec4 o, in vec2 f) { o = vec4(1.0); }\n";
+    const auto passes = splitShadertoyPasses(src);
+    CHECK(passes.size() == 1 && passes[0].name == "image", "first-line marker detected");
+  }
+
+  // --- `// pass:name` without a space after the colon also works
+  {
+    const std::string src =
+        "// pass:buffer_a\n"
+        "void mainImage(out vec4 o, in vec2 f) { o = vec4(1.0); }\n";
+    const auto passes = splitShadertoyPasses(src);
+    CHECK(passes.size() == 1 && passes[0].name == "buffer_a", "marker without space after colon");
+  }
+
+  // --- a UTF-8 BOM at byte 0 must not hide a first-line marker
+  {
+    const std::string src =
+        std::string("\xEF\xBB\xBF") +
+        "// pass: image\n"
+        "void mainImage(out vec4 o, in vec2 f) { o = vec4(1.0); }\n";
+    const auto passes = splitShadertoyPasses(src);
+    CHECK(passes.size() == 1 && passes[0].name == "image", "UTF-8 BOM does not hide the marker");
+  }
+
+  // --- extractShadertoyRenderScale: per-file buffer resolution option.
+  // Same strict first-comment rule as markers: only whitespace before the
+  // comment, token-exact, so prose can never trigger it. Clamped to (0,1].
+  {
+    const std::string src =
+        "// header prose\n"
+        "// option: renderScale 0.5\n"
+        "void mainImage(out vec4 o, in vec2 f) { o = vec4(1.0); }\n";
+    CHECK_NEAR(extractShadertoyRenderScale(src), 0.5f, 1e-6f, "renderScale 0.5 parsed");
+  }
+  {
+    const std::string src =
+        "// option: renderScale 0.25\n"
+        "// option: renderScale 0.75\n";  // first wins
+    CHECK_NEAR(extractShadertoyRenderScale(src), 0.25f, 1e-6f, "first renderScale wins");
+  }
+  {
+    // prose that merely mentions the text must NOT trigger the option
+    const std::string src = "// no `// option: renderScale 0.5` markers here\n";
+    CHECK_NEAR(extractShadertoyRenderScale(src), 1.0f, 1e-6f, "prose mention ignored");
+  }
+  {
+    // nested description must not trigger the option
+    const std::string src = "//   // option: renderScale 0.25 - a nested mention\n";
+    CHECK_NEAR(extractShadertoyRenderScale(src), 1.0f, 1e-6f, "nested mention ignored");
+  }
+  {
+    // CRLF + BOM are handled; values clamp to (0,1]
+    const std::string src = std::string("\xEF\xBB\xBF") + "// option: renderScale 2.0\r\n";
+    CHECK_NEAR(extractShadertoyRenderScale(src), 1.0f, 1e-6f, "renderScale >1 clamps to 1");
+    const std::string neg = "// option: renderScale -0.5\n";
+    CHECK_NEAR(extractShadertoyRenderScale(neg), 1.0f, 1e-6f, "negative renderScale -> default");
+    const std::string zero = "// option: renderScale 0\n";
+    CHECK_NEAR(extractShadertoyRenderScale(zero), 1.0f, 1e-6f, "zero renderScale -> default");
+  }
+  {
+    // missing value falls back to default
+    const std::string src = "// option: renderScale\n";
+    CHECK_NEAR(extractShadertoyRenderScale(src), 1.0f, 1e-6f, "missing value -> default");
+  }
+  {
+    // trailing garbage after the number is NOT accepted (strtof would stop
+    // at the first non-numeric char, so `0.5foo` must not parse as 0.5)
+    const std::string junk = "// option: renderScale 0.5foo\n";
+    CHECK_NEAR(extractShadertoyRenderScale(junk), 1.0f, 1e-6f, "trailing junk rejected");
+    const std::string dot = "// option: renderScale 0.5.0\n";
+    CHECK_NEAR(extractShadertoyRenderScale(dot), 1.0f, 1e-6f, "malformed number rejected");
+  }
+  {
+    // wrong option name is not renderScale
+    const std::string src = "// option: exposure 0.5\n";
+    CHECK_NEAR(extractShadertoyRenderScale(src), 1.0f, 1e-6f, "other option ignored");
+  }
+
+  // --- the REAL shipped files split into the intended structure
+  {
+    const std::string dir = NULLSECTOR_DATA_DIR;
+    // plasma.glsl is a single-pass sample: header prose mentions the marker
+    // text - the old parser treated that mention as a marker and compiled a
+    // truncated body; now it must be exactly one image pass
+    {
+      std::ifstream f(dir + "/shadertoy/plasma.glsl");
+      const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+      const auto passes = splitShadertoyPasses(s);
+      CHECK(passes.size() == 1, "plasma.glsl: one pass");
+      CHECK(passes.size() == 1 && passes[0].name == "image", "plasma.glsl: image pass");
+      CHECK(passes.size() == 1 && passes[0].src.find("mainImage") != std::string::npos,
+            "plasma.glsl: body intact");
+      CHECK(passes.size() == 1 && passes[0].src.find("hash21") != std::string::npos,
+            "plasma.glsl: helpers intact");
+      CHECK_NEAR(extractShadertoyRenderScale(s), 1.0f, 1e-6f, "plasma.glsl: full-res default");
+    }
+    // tunnel_warp.glsl: header DOCUMENTS the markers with nested comments -
+    // only the three real marker lines may split, and each pass keeps its body
+    {
+      std::ifstream f(dir + "/shadertoy/tunnel_warp.glsl");
+      const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+      const auto passes = splitShadertoyPasses(s);
+      CHECK(passes.size() == 3, "tunnel_warp.glsl: three passes");
+      CHECK(passes.size() >= 3 && passes[0].name == "common", "tunnel_warp: common first");
+      CHECK(passes.size() >= 3 && passes[1].name == "buffer_a", "tunnel_warp: buffer_a");
+      CHECK(passes.size() >= 3 && passes[2].name == "image", "tunnel_warp: image last");
+      if (passes.size() == 3) {
+        CHECK(passes[0].src.find("hash21") != std::string::npos, "tunnel_warp: common helpers");
+        CHECK(passes[1].src.find("mainImage") != std::string::npos, "tunnel_warp: buffer_a body");
+        CHECK(passes[1].src.find("// pass: image") == std::string::npos,
+              "tunnel_warp: image marker not leaked into buffer_a");
+        CHECK(passes[2].src.find("warp(") != std::string::npos, "tunnel_warp: image body");
+      }
+      CHECK_NEAR(extractShadertoyRenderScale(s), 0.5f, 1e-6f, "tunnel_warp.glsl: renderScale 0.5");
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+static void testLogSink() {
+  std::vector<std::string> got;
+  Log::setSink([&](const std::string& l) { got.push_back(l); });
+  Log::info("T", "alpha");
+  Log::warn("T", "beta");
+  Log::setSink({});
+  CHECK(got.size() == 2, "log sink captured both lines");
+  CHECK(got.size() >= 2 && got[0].find("[INF][T] alpha") != std::string::npos, "log sink line format (info)");
+  CHECK(got.size() >= 2 && got[1].find("[WRN][T] beta") != std::string::npos, "log sink line format (warn)");
+
+  // re-arming a sink replaces the previous one; stderr output is unaffected
+  std::vector<std::string> again;
+  Log::setSink([&](const std::string& l) { again.push_back(l); });
+  Log::error("T", "gamma");
+  Log::setSink({});
+  CHECK(again.size() == 1 && again[0].find("[ERR][T] gamma") != std::string::npos, "sink re-armed works");
+  CHECK(got.size() == 2, "old sink no longer receives lines");
+}
+
+// ---------------------------------------------------------------------------
+// testGpuTimeStats - the GL-free accumulation behind the Shadertoy importer's
+// GPU-timing log line and --check-shadertoy profiling: the EMA used for the
+// periodic "X ms/frame GPU" note, the beginProfile/endProfileMs window used
+// to measure a mean over N frames, and the log throttle (once per logEvery
+// samples, so the note appears ~every 2s at 60fps, not every frame).
+// ---------------------------------------------------------------------------
+static void testGpuTimeStats() {
+  // EMA: starts from the first sample, then decays toward newer ones
+  GpuTimeStats s;
+  CHECK(s.emaMs == 0.0, "EMA starts at 0");
+  CHECK(s.ema() == 0.0, "ema() accessor starts at 0 (no sample yet)");
+  s.add(2.0f);
+  CHECK_NEAR(s.emaMs, 2.0, 1e-9, "EMA takes the first sample");
+  CHECK_NEAR(s.ema(), 2.0, 1e-9, "ema() accessor follows the EMA");
+  s.add(10.0f);
+  CHECK(s.emaMs > 2.0 && s.emaMs < 10.0, "EMA moves toward the new sample");
+  CHECK_NEAR(s.ema(), 2.0 * 0.9 + 10.0 * 0.1, 1e-9, "ema() accessor blend weight");
+
+  // lastMs: the most recent UNSMOOTHED sample (the --perf-raw rows - the
+  // raw value keeps spikes that the EMA smooths away)
+  GpuTimeStats rw;
+  CHECK(rw.lastMs() == 0.0, "last raw ms starts at 0 (no sample yet)");
+  rw.add(1.5f);
+  CHECK_NEAR(rw.lastMs(), 1.5, 1e-9, "lastMs() is the latest raw sample");
+  rw.add(7.5f);
+  CHECK_NEAR(rw.lastMs(), 7.5, 1e-9, "lastMs() updates with each sample");
+  // the EMA follows the raw value but is NOT equal to it once smoothing
+  // has kicked in - raw mode must report the unsmoothed ms
+  CHECK(rw.ema() != rw.lastMs(), "raw and EMA diverge after the first sample");
+
+  // profile window: mean over the collected samples, -1 with none
+  GpuTimeStats p;
+  CHECK(p.meanMs() == -1.0, "mean with no samples is -1");
+  p.beginProfile();
+  p.add(1.0f);
+  p.add(3.0f);
+  p.add(2.0f);
+  p.endProfile();
+  CHECK_NEAR(p.meanMs(), 2.0, 1e-9, "profile mean over the window");
+  // samples collected AFTER the window must not move the frozen mean
+  p.add(100.0f);
+  CHECK_NEAR(p.meanMs(), 2.0, 1e-9, "post-window samples do not move the mean");
+  // a second window resets the accumulator
+  p.beginProfile();
+  p.add(4.0f);
+  p.endProfile();
+  CHECK_NEAR(p.meanMs(), 4.0, 1e-9, "new window resets the mean");
+  // a window with no samples reports -1 (beginProfile resets the sum)
+  p.beginProfile();
+  p.endProfile();
+  CHECK(p.meanMs() == -1.0, "window with no samples is -1");
+  CHECK(p.medianMs() == -1.0, "median with no samples is -1");
+
+  // median: robust against a single outlier frame (a driver hiccup can
+  // inflate a short-window mean by 2-3x; the median ignores it)
+  GpuTimeStats m;
+  m.beginProfile();
+  for (int i = 0; i < 29; i++) m.add(1.0f);
+  m.add(50.0f);  // one outlier
+  m.endProfile();
+  CHECK_NEAR(m.meanMs(), (29.0 + 50.0) / 30.0, 1e-9, "mean includes the outlier");
+  CHECK_NEAR(m.medianMs(), 1.0, 1e-9, "median ignores the outlier");
+  // even count -> upper median
+  GpuTimeStats e;
+  e.beginProfile();
+  e.add(1.0f);
+  e.add(1.0f);
+  e.add(2.0f);
+  e.add(3.0f);
+  e.endProfile();
+  CHECK_NEAR(e.medianMs(), 2.0, 1e-9, "even count upper median");
+
+  // log throttle: exactly once per logEvery collected samples
+  GpuTimeStats l;
+  for (int i = 0; i < 119; i++) CHECK(!l.logDue(), "no log before the 120th sample");
+  CHECK(l.logDue(), "log fires on the 120th sample");
+  CHECK(!l.logDue(), "throttle resets after firing");
+  // a zero/negative logEvery is clamped so the throttle can never spin
+  GpuTimeStats z;
+  z.logEvery = 0;
+  CHECK(z.logDue(), "logEvery 0 clamps to fire every sample");
+
+  // formatting: two decimals
+  CHECK(fmtMs(1.2345) == "1.23", "fmtMs two decimals");
+  CHECK(fmtMs(0.0) == "0.00", "fmtMs zero");
+
+  // --- PerfRingState: the GL_TIMESTAMP ring's bookkeeping (the part of
+  // PerfTimer that used to live inline in ShadertoyFX and silently dropped
+  // every sample when the CPU ran ahead of the GPU - a single next-frame
+  // availability check). Trace with a 4-slot ring:
+  //   issue x3 -> pending 3, oldest still slot 0; collect -> oldest 1
+  //   issue to full -> oldest 1; issue again while full overwrites the
+  //   oldest (the write slot IS the oldest) and pending caps at the count
+  PerfRingState r(4);
+  CHECK(r.pending == 0 && r.oldest() == 0, "empty ring: oldest is the write slot");
+  r.issued(); r.issued(); r.issued();
+  CHECK(r.pending == 3 && r.oldest() == 0, "issued pairs keep the oldest at slot 0");
+  r.collected();
+  CHECK(r.pending == 2 && r.oldest() == 1, "collecting the oldest advances it");
+  r.issued(); r.issued();
+  CHECK(r.pending == 4 && r.oldest() == 1, "ring full: every slot holds a pair");
+  r.issued();  // full + issue without collect: overwrites (drops) the oldest
+  CHECK(r.pending == 4 && r.oldest() == 2, "full-ring issue drops the oldest pair");
+  for (int i = 0; i < 10; i++) r.collected();
+  CHECK(r.pending == 0 && r.oldest() == 2, "collected clamps at zero");
+
+  // --- per-run recorder (the --perf-json exit dump reads these): a bounded
+  // circular window over the run's samples + a running total
+  {
+    GpuTimeStats q;
+    for (int i = 1; i <= 5; i++) q.add((float)i);  // 1..5
+    CHECK(q.recordedCount() == 5, "recorder counts every sample");
+    CHECK_NEAR(q.medianRecorded(), 3.0, 1e-9, "recorder median");
+    CHECK_NEAR(q.meanRecorded(), 3.0, 1e-9, "recorder mean");
+    CHECK_NEAR(q.minRecorded(), 1.0, 1e-9, "recorder min");
+    CHECK_NEAR(q.maxRecorded(), 5.0, 1e-9, "recorder max");
+  }
+  {
+    // circular overwrite: cap 4, add 1..6 -> the window holds {3,4,5,6}
+    GpuTimeStats q(4);
+    for (int i = 1; i <= 6; i++) q.add((float)i);
+    CHECK(q.recordedCount() == 6, "recorder counts overwritten samples too");
+    CHECK_NEAR(q.medianRecorded(), 5.0, 1e-9, "circular median over the last 4 (upper)");
+    CHECK_NEAR(q.meanRecorded(), 4.5, 1e-9, "circular mean over the last 4");
+    CHECK_NEAR(q.minRecorded(), 3.0, 1e-9, "circular min");
+    CHECK_NEAR(q.maxRecorded(), 6.0, 1e-9, "circular max");
+  }
+  {
+    // cap 0: nothing stored (median/mean -1), but the count still tracks
+    GpuTimeStats q(0);
+    for (int i = 0; i < 5; i++) q.add(1.0f);
+    CHECK(q.recordedCount() == 5, "cap 0 still counts samples");
+    CHECK(q.medianRecorded() == -1.0 && q.meanRecorded() == -1.0, "cap 0 -> no window stats");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// demo data validation: the data/demo.nsd script + every JSON the show
+// consumes must parse, build and round-trip (GL-free, so it runs in CI).
+// ---------------------------------------------------------------------------
+static void testDemoData() {
+  const std::string dir = NULLSECTOR_DATA_DIR;
+  CHECK(!dir.empty() && std::filesystem::is_directory(dir), "data dir exists");
+
+  // 1. the flagship script parses + builds into the timeline + sections
+  ScriptEngine se;
+  CHECK(se.load(dir + "/demo.nsd"), "demo.nsd loads");
+  CHECK((int)se.scenes().size() == 10, "demo.nsd declares 10 scenes");
+  CHECK(se.duration() > 120.0f && se.duration() < 130.0f, "demo.nsd duration ~125s");
+  TimelineEditor te;
+  se.build(te);  // sections/unresolved populate here
+  CHECK((int)se.sections().size() == 10, "demo.nsd yields 10 sections");
+  CHECK(se.unresolved().empty(), "demo.nsd has no unresolved shows");
+  CHECK(te.events.size() >= 20, "timeline built from script has 20+ events");
+  CHECK(te.duration > 120.0f && te.duration < 130.0f, "timeline duration follows the script");
+  // the app dispatches `marker NAME` commands - they must reach the timeline
+  bool markerCmd = false;
+  for (const auto& ev : te.events)
+    for (const auto& c : ev.cmds) if (c.name == "marker") markerCmd = true;
+  CHECK(markerCmd, "script markers reach the timeline as commands");
+
+  // every scene has a camera rig + at least one show command in its setup
+  for (const auto& b : se.scenes()) {
+    bool hasCamera = false, hasShow = false;
+    for (const auto& c : b.setup) {
+      if (c.name == "camera") hasCamera = true;
+      if (c.name == "show" || c.name == "load" || c.name == "shader") hasShow = true;
+    }
+    CHECK(hasCamera, ("scene " + b.name + " declares a camera").c_str());
+    CHECK(hasShow, ("scene " + b.name + " shows content").c_str());
+  }
+
+  // 2. every JSON data file parses
+  const char* jsons[] = {
+      "post/cinematic.json", "post/vhs.json", "post/clean.json",
+      "materials/chrome.json", "materials/neon.json",
+      "scenes/lightbox.json", "timelines/beat_map.json",
+  };
+  for (const char* f : jsons) {
+    bool ok = false;
+    try {
+      const Value v = Json::parseFile(dir + "/" + f);
+      ok = !v.isNull();
+    } catch (const std::exception&) {
+      ok = false;
+    }
+    CHECK(ok, (std::string("json parses: ") + f).c_str());
+  }
+
+  // 3. the scene JSON round-trips into a SceneGraph with expected nodes
+  try {
+    SceneGraph g;
+    g.fromJson(Json::parseFile(dir + "/scenes/lightbox.json"));
+    CHECK(g.find("terrain") != nullptr, "scene json: terrain node");
+    CHECK(g.find("gem") != nullptr, "scene json: gem node");
+    CHECK(g.find("sun") != nullptr, "scene json: sun light");
+    CHECK(g.find("caption") != nullptr, "scene json: caption text");
+    SceneNode* terrain = g.find("terrain");
+    if (terrain && terrain->asMesh()) CHECK(terrain->asMesh()->model == "terrain.obj", "scene json: terrain model ref");
+  } catch (const std::exception& e) {
+    CHECK(false, (std::string("scene json round-trip: ") + e.what()).c_str());
+  }
+
+  // 4. the timeline JSON round-trips (tracks/events/markers/clips)
+  try {
+    TimelineEditor t;
+    t.fromJson(Json::parseFile(dir + "/timelines/beat_map.json"));
+    CHECK(t.duration > 120.0f, "timeline json: duration");
+    CHECK(t.tracks.size() == 3, "timeline json: tracks");
+    CHECK(t.events.size() >= 4, "timeline json: events");
+    CHECK(t.markers.size() == 3, "timeline json: markers");
+    CHECK(t.clips.size() == 2, "timeline json: clips");
+  } catch (const std::exception& e) {
+    CHECK(false, (std::string("timeline json round-trip: ") + e.what()).c_str());
+  }
+
+  // 5. material JSON carries the PBR fields the importer reads
+  try {
+    const Value v = Json::parseFile(dir + "/materials/chrome.json");
+    CHECK(v.get("baseColor").size() == 4, "chrome: baseColor vec4");
+    CHECK(v.get("metallic").asNum() > 0.9, "chrome: metallic");
+    CHECK(v.get("roughness").asNum() < 0.2, "chrome: roughness");
+  } catch (const std::exception& e) {
+    CHECK(false, (std::string("material json: ") + e.what()).c_str());
+  }
+
+  // 6. shadertoy sources exist and split into the intended pass structure
+  //    (the splitter is GL-free, so the importer's parsing is CI-verified;
+  //    the header prose of both files mentions/nests "// pass:" text and
+  //    must NOT create false markers)
+  CHECK(std::filesystem::exists(dir + "/shadertoy/plasma.glsl"), "shadertoy: plasma.glsl");
+  CHECK(std::filesystem::exists(dir + "/shadertoy/tunnel_warp.glsl"), "shadertoy: tunnel_warp.glsl");
+  {
+    std::ifstream f(dir + "/shadertoy/plasma.glsl");
+    const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const auto p = splitShadertoyPasses(s);
+    CHECK(p.size() == 1 && p[0].name == "image", "plasma.glsl: single image pass");
+  }
+  {
+    std::ifstream f(dir + "/shadertoy/tunnel_warp.glsl");
+    const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const auto p = splitShadertoyPasses(s);
+    CHECK(p.size() == 3 && p[0].name == "common" && p[1].name == "buffer_a" && p[2].name == "image",
+          "tunnel_warp.glsl: common/buffer_a/image passes");
+    CHECK_NEAR(extractShadertoyRenderScale(s), 0.5f, 1e-6f, "tunnel_warp.glsl: renderScale 0.5");
+  }
+  {
+    std::ifstream f(dir + "/shadertoy/plasma.glsl");
+    const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    CHECK_NEAR(extractShadertoyRenderScale(s), 1.0f, 1e-6f, "plasma.glsl: full-res default");
+  }
+
+  // 7. the OBJ models exist with the expected structure (v/vt/vn + faces)
+  {
+    std::ifstream f(dir + "/models/terrain.obj");
+    std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    CHECK(s.find("v ") != std::string::npos, "terrain.obj: vertices");
+    CHECK(s.find("vn ") != std::string::npos, "terrain.obj: normals");
+    CHECK(s.find("f ") != std::string::npos, "terrain.obj: faces");
+  }
+  {
+    std::ifstream f(dir + "/models/gem.obj");
+    std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const size_t nFaces = std::count(s.begin(), s.end(), '\n');
+    CHECK(s.find("f ") != std::string::npos && nFaces > 0, "gem.obj: faces");
+  }
+
+  // 8. the EXAMPLE production (data/examples/ExampleDemo.nsd) parses, builds
+  //    into 4 sections with no unresolved shows, and only references effects
+  //    + assets that ship with the engine - so a fresh clone can run it
+  //    immediately (the request's "very small example production separate
+  //    from Ghost In The Machine")
+  {
+    ScriptEngine ex;
+    CHECK(ex.load(dir + "/examples/ExampleDemo.nsd"), "ExampleDemo.nsd loads");
+    CHECK(ex.script().bpm == 140.0f, "ExampleDemo: tempo 140");
+    TimelineEditor exTe;
+    ex.build(exTe);
+    CHECK((int)ex.scenes().size() == 4, "ExampleDemo: 4 scenes");
+    CHECK((int)ex.sections().size() == 4, "ExampleDemo: 4 sections");
+    CHECK(ex.unresolved().empty(), "ExampleDemo: no unresolved shows");
+    CHECK(exTe.duration > 40.0f && exTe.duration < 44.0f, "ExampleDemo: duration ~42s");
+    // every show target resolves to a scene or a built-in effect name
+    const std::vector<std::string> known = {"intro", "shadertoy:plasma.glsl", "tunnel", "greetings"};
+    for (const auto& b : ex.scenes()) {
+      for (const auto& c : b.setup) {
+        if (c.name == "show" && !c.args.empty()) {
+          const std::string t = c.args[0].asStr();
+          const bool isScene = ex.scene(t) != nullptr;
+          const bool isEffect = std::find(known.begin(), known.end(), t) != known.end();
+          CHECK(isScene || isEffect, ("ExampleDemo: show target resolves (" + t + ")").c_str());
+        }
+      }
+    }
+    // the shadertoy + greetings assets the example references exist on disk
+    CHECK(std::filesystem::exists(dir + "/shadertoy/plasma.glsl"), "ExampleDemo: plasma.glsl shipped");
+  }
+}
+
+}  // namespace ns
+
+static void runAll() {
+  ns::testJson();
+  ns::testScriptParser();
+  ns::testScriptDiagnostics();
+  ns::testScriptEngineAndTimeline();
+  ns::testAnimation();
+  ns::testSceneGraph();
+  ns::testCameraRig();
+  ns::testAssetManager();
+  ns::testFileWatcher();
+  ns::testLiveReloadChain();
+  ns::testShadertoyParser();
+  ns::testLogSink();
+  ns::testValueStrings();
+  ns::testGpuTimeStats();
+  ns::testDemoData();
+}
+
+int main() {
+  try {
+    runAll();
+  } catch (const std::exception& ex) {
+    std::fprintf(stderr, "UNCAUGHT EXCEPTION: %s\n", ex.what());
+    return 2;
+  } catch (...) {
+    std::fprintf(stderr, "UNCAUGHT NON-STD EXCEPTION\n");
+    return 2;
+  }
+  std::printf("framework tests: %d passed, %d failed\n", ns::g_passed, ns::g_failed);
+  return ns::g_failed == 0 ? 0 : 1;
+}

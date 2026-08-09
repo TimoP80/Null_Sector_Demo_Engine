@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NULL SECTOR // GHOST IN THE MACHINE — Engine Documentation</title>
+<meta name="description" content="Documentation for the data-driven demo engine: a C++17/OpenGL demoscene framework scripted entirely from external files.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">00</span> Overview</p>
+        <h1>GHOST IN THE MACHINE</h1>
+        <p class="lede">A data-driven demo engine. The whole show — scenes, cameras, effects, animations, post processing, 3D models and imported Shadertoy shaders — lives in external files. The engine is never recompiled to make a new demo.</p>
+        <div class="chips" style="margin-top:20px">
+          <a class="chip active" href="cheatsheet.html">⚡ One-page cheat sheet</a>
+        </div>
+      </header>
+
+      <!-- hero terminal -->
+      <div id="term" class="terminal" aria-label="The demo script, demo.nsd">
+        <div class="term-head">
+          <span class="dot" style="background:var(--hot)"></span>
+          <span class="dot" style="background:var(--amber)"></span>
+          <span class="dot" style="background:var(--phosphor)"></span>
+          <span class="t-title">data/demo.nsd</span>
+        </div>
+        <div class="term-body"></div>
+      </div>
+
+      <!-- what it is -->
+      <section>
+        <h2>The idea in one screen</h2>
+        <p class="sec-sub">A demoscene production is a timeline: scenes fire at exact times, cameras move on rails, effects start and stop, and the music drives the visuals. This engine turns that timeline into a language, and everything else into files.</p>
+        <div class="grid">
+          <div class="card">
+            <span class="glyph">~</span>
+            <h3>Script, don't code</h3>
+            <p><code>at 26.7 { show Neuralnet; marker Synapse }</code> — a production is a plain-text script. No effect is hardcoded in the renderer.</p>
+          </div>
+          <div class="card">
+            <span class="glyph">◍</span>
+            <h3>Everything is data</h3>
+            <p>Scenes, timelines, materials, post presets, camera rigs and assets are JSON or GLSL on disk, loaded at runtime and hot-reloaded while it plays.</p>
+          </div>
+          <div class="card">
+            <span class="glyph">▶</span>
+            <h3>Plays to the music</h3>
+            <p>The audio engine analyses the track — bass, mid, treble, kick, beat, BPM — and feeds the values to shaders as uniforms.</p>
+          </div>
+          <div class="card">
+            <span class="glyph">⌘</span>
+            <h3>Extensible by plugin</h3>
+            <p>New effects register themselves through a factory registry; plugins can be dropped in as shared libraries without touching the engine.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- architecture -->
+      <section>
+        <h2>Architecture</h2>
+        <p class="sec-sub">Four layers. The shell owns the window and the frame loop; the director turns data into events; the framework is a GL-free library of authoring systems; the engine is the raw GL layer. Only the bottom two touch OpenGL.</p>
+
+        <div class="arch">
+          <div class="arch-row">
+            <div class="arch-label">01 · Shell — <span style="text-transform:none;letter-spacing:0">src/main.cpp</span></div>
+            <div class="arch-box hot">Window &amp; GL context</div>
+            <div class="arch-box hot">Audio engine</div>
+            <div class="arch-box hot">Show clock</div>
+            <div class="arch-box hot">Hotkeys / flags</div>
+          </div>
+          <div class="arch-flow"></div>
+          <div class="arch-row">
+            <div class="arch-label">02 · Director — <span style="text-transform:none;letter-spacing:0">src/app</span></div>
+            <div class="arch-box phos"><b>DemoApp</b></div>
+            <div class="arch-box">Shader manager</div>
+            <div class="arch-box">Post stack</div>
+            <div class="arch-box">Shadertoy importer</div>
+            <div class="arch-box">Model renderer</div>
+            <div class="arch-box">Effect registry</div>
+          </div>
+          <div class="arch-flow"></div>
+          <div class="arch-row">
+            <div class="arch-label">03 · Framework core — <span style="text-transform:none;letter-spacing:0">src/framework · GL-free</span></div>
+            <div class="arch-box">Script parser</div>
+            <div class="arch-box">Timeline editor</div>
+            <div class="arch-box">Animation</div>
+            <div class="arch-box">Scene graph</div>
+            <div class="arch-box">Camera rigs</div>
+            <div class="arch-box">Assets</div>
+            <div class="arch-box">JSON</div>
+          </div>
+          <div class="arch-flow"></div>
+          <div class="arch-row">
+            <div class="arch-label">04 · Engine — <span style="text-transform:none;letter-spacing:0">src/engine · the GL layer</span></div>
+            <div class="arch-box">Renderer</div>
+            <div class="arch-box">Camera</div>
+            <div class="arch-box">PostFX</div>
+            <div class="arch-box">Text</div>
+            <div class="arch-box">Audio</div>
+            <div class="arch-box">UBO</div>
+          </div>
+          <div class="arch-flow"></div>
+          <div class="arch-row">
+            <div class="arch-label">05 · Data — <span style="text-transform:none;letter-spacing:0">data/ · edit this to make a demo</span></div>
+            <div class="arch-box">demo.nsd</div>
+            <div class="arch-box">post/</div>
+            <div class="arch-box">shadertoy/</div>
+            <div class="arch-box">models/</div>
+            <div class="arch-box">materials/</div>
+            <div class="arch-box">scenes/</div>
+            <div class="arch-box">timelines/</div>
+            <div class="arch-box">textures/</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- the show -->
+      <section>
+        <h2>The bundled demo <span class="tag">10 scenes · 125 s · 216 bpm</span></h2>
+        <p class="sec-sub">The shipped production, <em>GHOST IN THE MACHINE</em>, is scripted entirely in <code>data/demo.nsd</code>. Its section map — real times from the script:</p>
+        <div class="strip">
+          <div class="strip-item"><div class="st-time">0:00.0</div><div class="st-name">Awakening</div><div class="st-scene">Intro</div></div>
+          <div class="strip-item"><div class="st-time">0:13.3</div><div class="st-name">Nave</div><div class="st-scene">Cathedral</div></div>
+          <div class="strip-item"><div class="st-time">0:26.7</div><div class="st-name">Synapse</div><div class="st-scene">Neuralnet</div></div>
+          <div class="strip-item"><div class="st-time">0:40.0</div><div class="st-name">Machine</div><div class="st-scene">Machine</div></div>
+          <div class="strip-item"><div class="st-time">0:53.3</div><div class="st-name">Downtown</div><div class="st-scene">Voxel</div></div>
+          <div class="strip-item"><div class="st-time">1:04.4</div><div class="st-name">Imported</div><div class="st-scene">Shadertoy</div></div>
+          <div class="strip-item"><div class="st-time">1:17.8</div><div class="st-name">Pipeline</div><div class="st-scene">Model</div></div>
+          <div class="strip-item"><div class="st-time">1:28.9</div><div class="st-name">Formation</div><div class="st-scene">Ghost</div></div>
+          <div class="strip-item"><div class="st-time">1:42.2</div><div class="st-name">Reprise</div><div class="st-scene">Tunnel</div></div>
+          <div class="strip-item"><div class="st-time">1:55.6</div><div class="st-name">Sign-Off</div><div class="st-scene">Greetings</div></div>
+        </div>
+      </section>
+
+      <!-- capabilities -->
+      <section>
+        <h2>Capabilities</h2>
+        <p class="sec-sub">Everything the engine does is reachable from data. Each card links to the page that documents it.</p>
+        <div class="feature-grid">
+          <a class="card" href="cheatsheet.html"><span class="glyph hot">⚡</span><h3>Cheat Sheet</h3><p>One page: commands, times, rigs, interpolators — every name at a glance.</p></a>
+          <a class="card" href="dsl.html"><span class="glyph hot">λ</span><h3>Scripting DSL</h3><p>The <code>scene</code>/<code>at</code> language that compiles into timeline events.</p></a>
+          <a class="card" href="timeline.html"><span class="glyph">▤</span><h3>Timeline</h3><p>Tracks, events, clips, markers; play, pause, seek, loop, speed.</p></a>
+          <a class="card" href="animation.html"><span class="glyph blue">◈</span><h3>Animation</h3><p>Keyframes for any property with 9 interpolators.</p></a>
+          <a class="card" href="scene.html"><span class="glyph violet">⬡</span><h3>Scene graph</h3><p>Hierarchy, transforms, tags, layers — 10 node types.</p></a>
+          <a class="card" href="cameras.html"><span class="glyph">◎</span><h3>Camera rigs</h3><p>Orbit, fly, path splines, shake, DOF — all from data.</p></a>
+          <a class="card" href="shaders.html"><span class="glyph amber">#</span><h3>Shader manager</h3><p>Includes, caching, reflection, uniform binding, hot reload.</p></a>
+          <a class="card" href="shadertoy.html"><span class="glyph hot">ƒ</span><h3>Shadertoy import</h3><p>mainImage, iTime, iMouse, iChannel0–3, buffers A–D.</p></a>
+          <a class="card" href="postfx.html"><span class="glyph">✦</span><h3>Post FX</h3><p>Stackable bloom, DOF, CRT, grain, grade, fxaa &amp; more.</p></a>
+          <a class="card" href="assets.html"><span class="glyph blue">◫</span><h3>Assets</h3><p>Textures, models, materials, fonts — cached &amp; reloaded.</p></a>
+          <a class="card" href="plugins.html"><span class="glyph violet">⌥</span><h3>Plugins</h3><p>New effects via a factory registry or a shared library.</p></a>
+        </div>
+      </section>
+
+      <!-- quick start -->
+      <section>
+        <h2>Quick start</h2>
+        <p class="sec-sub">The project builds with CMake; GLFW is fetched automatically when not found. The framework core is GL-free and compiles anywhere.</p>
+
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">terminal</span><span class="lang">bash</span></div>
+          <pre># build everything (framework + tests + app)
+cmake -S . -B build -DNS_BUILD_APP=ON -DNS_BUILD_TESTS=ON
+cmake --build build --config Release --target ns_demo ns_fw_tests
+
+# run the framework test suite (no GL needed)
+./build/Release/ns_fw_tests.exe
+
+# run the show (drop a WAV/MP3 next to it to add music; without one it runs silent)
+./build/Release/ns_demo.exe --windowed</pre>
+        </div>
+
+        <div class="callout tip">
+          <span class="ct-label">Live</span>
+          <p>While the show runs, edit <code>data/demo.nsd</code> or any shader, texture or model it references — press <kbd>F2</kbd> to reload the script, and shaders/textures/models reload automatically. No restart, no recompile.</p>
+        </div>
+
+        <p class="sec-sub" style="margin-top:26px">Continue with <a href="dsl.html">the scripting DSL →</a> to read your first demo script, or jump straight to <a href="build.html">build &amp; run details →</a>.</p>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

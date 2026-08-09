@@ -1,0 +1,6 @@
+{
+  "name": "diag_vignette",
+  "passes": [
+    { "name": "vignette", "amount": 0.45, "curve": 2.2 }
+  ]
+}

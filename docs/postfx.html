@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Post FX — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">09</span> Rendering · Post FX</p>
+        <h1>Post-Processing Stack</h1>
+        <p class="lede">A configurable chain of stackable passes, built from data instead of being hardcoded. Passes ping-pong between two RGBA16F targets; the whole chain is a JSON preset or a one-line script command.</p>
+      </header>
+
+      <section>
+        <h2>Available passes</h2>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Pass</th><th>Example params</th><th>Notes</th></tr></thead>
+            <tbody>
+              <tr><td><code>dof</code></td><td><code>focus</code>, <code>aperture</code></td><td>Depth of field — uses the depth packed in the scene alpha.</td></tr>
+              <tr><td><code>bloom</code></td><td><code>threshold</code>, <code>intensity</code></td><td>HDR bloom; extract → blur (two-pass separable) → compose.</td></tr>
+              <tr><td><code>chromatic</code></td><td><code>amount</code></td><td>Chromatic aberration.</td></tr>
+              <tr><td><code>vignette</code></td><td><code>amount</code>, <code>curve</code></td><td>Corner darkening.</td></tr>
+              <tr><td><code>grain</code></td><td><code>amount</code></td><td>Film grain (time-seeded).</td></tr>
+              <tr><td><code>scanlines</code></td><td><code>amount</code></td><td>CRT-style scanlines.</td></tr>
+              <tr><td><code>pixelate</code></td><td><code>amount</code></td><td>Pixelation.</td></tr>
+              <tr><td><code>grade</code></td><td><code>tonemap</code>, <code>saturation</code>, <code>contrast</code>, <code>exposure</code></td><td>Color grading + optional tonemap. <em>Must be before fxaa.</em></td></tr>
+              <tr><td><code>fog</code></td><td>density, color</td><td>Depth fog from the packed alpha.</td></tr>
+              <tr><td><code>fxaa</code></td><td>—</td><td>Fast anti-aliasing — always last.</td></tr>
+              <tr><td><code>copy</code></td><td>—</td><td>Lossless HDR copy.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Preset format</h2>
+        <p class="sec-sub">A preset is a JSON file in <code>data/post/</code> (asset kind <code>post</code>): an ordered <code>passes</code> array, each pass a name + params. Depth-dependent passes (<code>dof</code>, <code>fog</code>) must come first; <code>fxaa</code> must come last because it does not preserve the depth alpha.</p>
+        <div class="code" data-lang="json">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/post/cinematic.json</span><span class="lang">json</span></div>
+          <pre>{
+  "name": "cinematic",
+  "passes": [
+    { "name": "bloom",     "threshold": 1.0, "intensity": 1.3 },
+    { "name": "grade",     "tonemap": true, "saturation": 1.06,
+                           "contrast": 1.04, "exposure": 1.0 },
+    { "name": "vignette",  "amount": 0.45, "curve": 2.2 },
+    { "name": "fxaa" }
+  ]
+}</pre>
+        </div>
+        <h4>Bundled presets</h4>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Preset</th><th>Look</th></tr></thead>
+            <tbody>
+              <tr><td><code>cinematic</code></td><td>Bloom + graded tonemap + vignette + fxaa — the filmic default.</td></tr>
+              <tr><td><code>vhs</code></td><td>Chromatic aberration, scanlines, grain, pixelate — the Downtown VHS grade.</td></tr>
+              <tr><td><code>clean</code></td><td>Light touch for the 3D asset pipeline scene.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>In the script</h2>
+        <p class="sec-sub">Three ways to drive the chain — preset, the legacy music-reactive chain, or an inline override:</p>
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/demo.nsd</span><span class="lang">nsd</span></div>
+          <pre>post preset cinematic        // load data/post/cinematic.json
+post legacy                  // the original music-reactive chain (bloom+CRT+flash)
+post { exposure 1.15 }       // inline params override
+
+// and animate it:
+at 2 { anim netExposure post.exposure smooth { 0 0.9; 5 1.15; 10 1.0 } }</pre>
+        </div>
+      </section>
+
+      <section>
+        <h2>Music-reactive chain</h2>
+        <p class="sec-sub">A <code>PostCtx</code> rides alongside each frame: time, delta, camera (for DOF/fog), motion, plus the audio-driven <code>bloomMul</code>, <code>glitch</code>, <code>exposure</code>, <code>heat</code> and <code>kick</code> — mapped onto bloom intensity, grade exposure and chromatic amount. Preset-driven stacks slam with the drum automatically.</p>
+        <div class="callout tip">
+          <span class="ct-label">Tip</span>
+          <p>Post params are animation targets too (<code>post.bloom</code>, <code>post.exposure</code>, <code>post.glitch</code>), so keyframes can shape the look mid-scene — exactly how the Ghost scene swells its bloom at the formation.</p>
+        </div>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

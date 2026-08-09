@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Build &amp; Run — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">01</span> Build &amp; Run</p>
+        <h1>Build &amp; Run</h1>
+        <p class="lede">Three CMake targets, one fetch, a handful of flags. The framework core builds without any graphics dependency, so authoring systems can be tested headlessly.</p>
+      </header>
+
+      <section>
+        <h2>Targets &amp; options</h2>
+        <p class="sec-sub">The project requires C++17. GLFW is located via <code>find_package(glfw3)</code>; if missing it is fetched from GitHub at configure time. <code>miniaudio</code> and <code>stb</code> are vendored headers in <code>third_party/</code>.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Target</th><th>What it is</th><th>GL needed?</th></tr></thead>
+            <tbody>
+              <tr><td><code>ns_framework</code></td><td>Static lib: scripting, timeline, animation, scene graph, camera rigs, JSON, assets, file watcher.</td><td class="dim">No</td></tr>
+              <tr><td><code>ns_fw_tests</code></td><td>Unit tests for the framework core — 253 checks incl. parsing the shipped <code>demo.nsd</code>, a live-reload chain test (watcher → markDirty → reloadDirty), the Log capture sink, and the GL-free Shadertoy pass splitter (plasma → 1 pass, tunnel_warp → common/buffer_a/image).</td><td class="dim">No</td></tr>
+              <tr><td><code>ns_demo</code></td><td>The demo app: engine + effects + DemoApp director + GLFW window.</td><td>Yes</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>CMake option</th><th>Default</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>NS_BUILD_APP</code></td><td><code>ON</code></td><td>Build <code>ns_demo</code>. Set <code>OFF</code> to build only framework + tests with no GLFW.</td></tr>
+              <tr><td><code>NS_BUILD_TESTS</code></td><td><code>ON</code></td><td>Build <code>ns_fw_tests</code>.</td></tr>
+              <tr><td><code>NS_SHADER_DIR</code> / <code>NS_ASSET_DIR</code> / <code>NS_DATA_DIR</code></td><td>source dirs</td><td>Baked-in base paths for runtime resource resolution.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4>Runtime directory overrides</h4>
+        <p>At runtime the base directories can be redirected with environment variables (see <code>src/engine/paths.hpp</code>): <code>NULLSECTOR_SHADER_DIR</code>, <code>NULLSECTOR_ASSET_DIR</code>, <code>NULLSECTOR_DATA_DIR</code>. This lets a packaged build point at an external asset set.</p>
+      </section>
+
+      <section>
+        <h2>Command-line flags</h2>
+        <p class="sec-sub">The shell (<code>src/main.cpp</code>) is deliberately thin — every flag exists to select data or to validate, never to encode show logic.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Flag</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><td><code>--demo=PATH</code></td><td>Demo script (default <code>data/demo.nsd</code>).</td></tr>
+              <tr><td><code>--track=F1,F2,…</code></td><td>Use a specific WAV/MP3 track — a <b>comma-separated list</b> becomes the runtime cycle: the first entry plays at boot and <kbd>T</kbd> / <kbd>Shift+T</kbd> rotates through the list (whitespace trimmed), instead of the disk scan. Auto-search otherwise.</td></tr>
+              <tr><td><code>--no-track</code></td><td>Run with no music file (the show plays silent).</td></tr>
+              <tr><td><code>--font=FILE</code></td><td>TrueType font for text nodes (default <code>assets/fonts/*.ttf</code>).</td></tr>
+              <tr><td><code>--plugin=DIR</code></td><td>Effect plugin directory (default <code>data/plugins</code>).</td></tr>
+              <tr><td><code>--windowed</code> / <code>--fullscreen</code></td><td>Window mode. The show defaults to fullscreen.</td></tr>
+              <tr><td><code>--window=WxH</code></td><td>Initial window size when windowed (default <code>1600x900</code>).</td></tr>
+              <tr><td><code>--check-shaders</code></td><td>Compile every engine shader stage plus the app's forward-lit <code>lit</code> program, then exit (CI-friendly).</td></tr>
+              <tr><td><code>--check-models</code></td><td>Headless-ish 3D pipeline preflight: a generated OBJ cube plus the shipped <code>data/models</code> + <code>data/materials</code> are imported, uploaded and drawn offscreen with a pixel readback. Exits <code>1</code> on any failure.</td></tr>
+              <tr><td><code>--check-hotreload</code></td><td>Live-reload smoke: boots the app, breaks + fixes a temp shader on disk, and verifies programmatically (manager state + captured log pair) that the broken edit kept the previous program and the fix recompiled it. Exits <code>0</code>/<code>1</code> for CI.</td></tr>
+              <tr><td><code>--check-shadertoy</code></td><td>Compiles and renders every <code>data/shadertoy/*.glsl</code> offscreen with a pixel readback — catches image-pass regressions (frame never reaching the scene target, or a feedback loop collapsing to a solid colour) and verifies per-file <code>// option: renderScale</code> is honored (declared scale == applied scale, buffer targets sized at <code>floor(res × scale)</code>). Also prints <code>[SHADERTOY-PERF]</code> lines — measured GPU ms/frame at 1280×720, plus a forced-full-res comparison for scaled files. Exits <code>1</code> on any failure.</td></tr>
+              <tr><td><code>--check-production[=PATH]</code></td><td>Headless production validator (GL-free): parses the <code>.nsd</code> script, then walks the production checklist — tempo/title/scenes declared, the section schedule is monotonic and fits the duration, every <code>show</code>/effect resolves against the registry, and every referenced file exists (shadertoy, model, material, plugin, post preset, shader, mesh texture, sprite) — printing one <code>ok:</code>/<code>FAIL:</code> line per check and exiting <code>1</code> on any failure. The audio-track probe scans the same roots the app auto-searches (<code>data/</code> + <code>assets/</code>): a missing track is an informational <code>ok:</code> note, not a failure — silent / synth / <code>--no-track</code> shows are valid. Default production: <code>data/demo.nsd</code>. Point it at any script, e.g. <code>--check-production=data/examples/ExampleDemo.nsd</code>.</td></tr>
+              <tr><td><code>--smoke-audio</code></td><td>Headless track decode + analyser self-test, then exit.</td></tr>
+              <tr><td><code>--perf-json[=PATH]</code></td><td>Write one GPU-time sample per effect (shadertoy / scene / particles) plus the post stack to <code>PATH</code> (default <code>perf.json</code>) at exit. Each sample is a stable recorded-window snapshot: <code>medianMs</code> / <code>meanMs</code> / <code>minMs</code> / <code>maxMs</code> / <code>frames</code>, plus effect context (<code>renderScale</code>, buffer size, bloom levels). Scripted A/B of a <code>renderScale</code> option = run twice, diff the medians.</td></tr>
+              <tr><td><code>--perf-csv[=PATH]</code></td><td>Append one row per second (<code>t kind name context ms</code>, tab-separated) for every <b>active</b> timed effect plus the post stack — the current <code>EMA ms/frame</code> of each, so a <code>renderScale</code> change (or a scene change mid-show) can be plotted over time instead of only dumped at exit. Inactive effects are simply absent from their seconds' rows, which <i>is</i> the plot of what the show cost. Default <code>perf.csv</code>; flushed every row, so it is <code>tail -f</code> friendly. Visualize a capture with <code>python docs/plot_perf.py perf.csv -o perf.png</code> — overlays one line per effect with its final <code>renderScale</code> in the legend (needs <code>pip install matplotlib</code>).</td></tr>
+              <tr><td><code>--perf-raw[=PATH]</code></td><td>Append one row per <b>collected</b> sample with the <b>unsmoothed</b> ms (<code>t kind name context ms</code>, tab-separated, default <code>perf.raw.csv</code>) — the per-second EMA smooths spikes away, this file keeps them, so stalls and <code>renderScale</code> steps show up as real peaks instead of a gentle slope. One row per new sample (deduped per frame), flushed once a second. Plot with <code>python docs/plot_perf.py --mode=raw -o raw.png</code>.</td></tr>
+              <tr><td><code>--perf-seconds=N</code></td><td>With <code>--perf-json</code>, <code>--perf-csv</code> or <code>--perf-raw</code>: auto-exit after N seconds and dump — the show loops forever otherwise, so scripted runs need this.</td></tr>
+              <tr><td><code>--editor</code></td><td>Dockable <b>Demo Editor</b> (Dear ImGui, vendored in <code>third_party/imgui</code>): live preview viewport with the real engine running inside it, scene-graph hierarchy, property inspector (transforms, visibility, per-type payloads — edits go live immediately), timeline lanes with events/markers/sections and click-to-scrub plus a <b>horizontal scrollbar</b> at the bottom (pan the visible window forward through a long show — the handle reflects the zoom share, drag it or click the track to jump, and zooming clamps the window back into range), plus a <b>Fit</b> button (or press <code>F</code>) that snaps the view to the whole show duration and scrolls back to 0 — press again to <b>restore</b> the previous zoom/scroll (any manual zoom or pan leaves fit mode, so the next <code>F</code> re-fits from where you are) — and the whole <b>view window (zoom + scroll + fit state) is remembered per show script</b> in <code>data/editor_state.json</code> (under a <code>timelineViews</code> map keyed by the show's script path, merged on every save so switching shows never loses another show's window): reopening a project — or switching scripts via the browser or a drop — lands exactly on the window you were editing, an audio waveform strip under the lanes (the loaded track's peak envelope in the top half + a live <b>FFT spectrogram</b> heat strip below it - the audio callback captures the mixed output into a rolling spectrum ring and renders it as columns scrolling left from the playhead, real frequency content of the track — flat silence when none is loaded — draggable to scrub) that doubles as a <b>beat-marker editor</b>: amber tick marks show the detected kick transients (windowed-energy peaks over the track's median), and the grid lines can be <b>dragged</b> to re-align the show's BPM grid to the actual track (click a kick tick to snap the grid to it, right-click the strip or use <code>Align beats to kicks</code> in the Audio popup to auto-fit the phase) — the alignment persists per-track in <code>data/editor_state.json</code> — and <b>scrub quantization</b>: press <code>Q</code> to snap the playhead (and the audio) to the nearest <b>aligned</b> grid line instead of free-form, <code>Shift+Q</code> to cycle beat/bar, with a <code>snap beat/bar</code> readout in the toolbar, a captured log console, asset browser, and a profiler with per-effect GPU time. Layouts persist automatically in <code>imgui.ini</code>; <code>View → Reset Layout</code> rebuilds the default docking. Transport: <code>Space</code> play/pause, <code>.</code> step a frame, <code>R</code> restart, <code>F2</code> reload the script.<br><br><b>Authoring:</b> the Toolbar's <code>+ Scene</code> appends a new <code>scene</code> block + activation to <code>demo.nsd</code> (extending the header <code>duration</code>), live-reloads the show and lands the playhead on it; <code>+ Asset</code> (also in the Assets panel) opens a dialog that writes Material / Post preset / Scene / Shader / Shadertoy template files into the <code>data/</code> folders, then applies them to the show (load material, apply preset, or render the shader in the viewport). The <code>TRK</code> button opens the <b>audio source</b> popup — it lives in three always-visible places so it can never be lost (the floating Toolbar can be closed or docked too narrow to show it): right-aligned in the <b>menu bar</b>, in the <b>Timeline</b> header next to <code>Fit</code> (the audio strip is in that panel), and in the Toolbar — plus <code>File → Load Track…</code> and <b><code>Ctrl+T</code></b> from anywhere. The popup: pick a <code>.wav/.mp3</code> from disk (files in <code>cwd</code>, <code>assets/</code> and <code>data/</code> are auto-scanned every couple of seconds), type a path, use <code>Browse…</code> — or <code>File → Open Asset</code> — to open a <b>shared asset browser</b> (one popup — deliberately not a modal, so dragging files out onto the scene works — with a category selector: Audio / Texture / Shader / Model / Script; <code>ESC</code> closes it). Each category recursively lists its files under its default folders (<code>assets/</code>, <code>data/</code>, <code>shaders/</code>, the exe dir — or any root you type, with <code>Rescan</code>), and picking one drives a real engine action: <b>Audio</b> loads the track, <b>Texture</b> warms <code>data/textures</code> and assigns it to a selected Sprite node, <b>Shader</b> shows it in the viewport (<code>quad:</code> for <code>.frag</code>, <code>shadertoy:</code> for <code>.glsl</code>; bare <code>.vert</code> files can't run standalone yet and warn), <b>Model</b> warms the OBJ cache under <code>data/models</code>, and <b>Script</b> switches the running demo to the picked <code>.nsd</code>. Double-click or select + the Open button to apply — or <b>drag-and-drop</b>: browser rows are drag sources, so drop a <b>Texture</b> onto a Sprite node in the Scene Hierarchy (the sprite texture switches instantly) or drop any asset (audio, shader, model, script) onto the live viewport to apply it, reusing the exact same pick actions — <b>shaders drop from any folder</b>: a <code>.frag</code> outside <code>shaders/</code> (e.g. <code>data/shaders</code>) or a <code>.glsl</code> outside <code>data/shadertoy</code> is resolved by its absolute path, so the drop shows the shader instead of failing silently (note: a quad shader shown this way recompiles only on the next show of that shader — scratch Save recompiles via the shader manager, so editing a shader that lives inside <code>shaders/</code> still hot-reloads live). The viewport also accepts <b>OS-level drops</b> — drag files straight from Windows Explorer or your file manager onto the picture (GLFW drop callback, position-gated to the viewport rect): the extension maps to the same actions as the browser (<code>.wav/.mp3/.ogg/.flac</code> loads the track, <code>.png/.jpg</code> warms the texture cache and assigns it to the selected Sprite, <code>.frag/.glsl</code> shows the shader, <code>.obj</code> warms the model cache, <code>.nsd</code> switches the script). Drops are routed by the <b>panel under the cursor</b> (z-priority, so floating windows win over the viewport) and land on the <b>exact sub-area</b> of split panels: the <b>Timeline</b> takes scripts (<code>.nsd</code> — drop the show's script to switch to it) anywhere, but audio (<code>.wav/.mp3/…</code>) must land on the <b>waveform strip</b> at the bottom (the audio zone — it loads the track asynchronously) while a drop on the <b>lanes</b> above is steered there with a hint toast, and the <b>Console</b> takes shaders on the <b>header/tool row</b> into a <b>shader scratch view</b> — a popup that is now a <b>live source editor</b>: the shader is applied to the viewport and the text is editable in place, with <b>Save</b> (or <b>Ctrl+S</b>, from anywhere in the popup) writing the file back and poking an immediate recompile, so you can tweak a dropped shader and watch hot-reload update the preview — no external editor needed; a <code>* unsaved</code> marker tracks edits, <b>Reload from disk</b> discards them and re-reads the file (e.g. after an external edit), <code>Show in viewport</code> re-applies, and <code>Close</code>/<code>ESC</code> dismisses while a shader dropped on the <b>log list</b> instead <b>filters the console to that shader's lines</b> (compile errors mention the filename — drop-to-debug), the <b>Assets</b> panel opens the browser rooted at the dropped file's own folder, and the <b>Viewport</b> keeps its existing behavior (any asset applies; see above). Dropping a <b>folder</b> on the viewport (or Assets panel) opens the <b>Open Asset</b> popup rooted at that folder with the category inferred from what's inside (a cheap recursive peek — a folder of <code>.wav</code>s opens on Audio, a mixed pack on the dominant type), so you can explore an asset pack straight from Explorer without typing a path; an empty folder just warns. Unrecognized extensions, wrong-type-for-panel drops, or drops not over any panel are ignored with a console warning — and every outcome (apply or ignore) flashes an on-screen <b>toast ring</b> over the viewport (phosphor for applied/loading, amber for ignored, red for a failed load, the last few stacked newest-lowest, each fading out after a few seconds) so the feedback — even from a multi-file drop — is visible without reading the console. Right-click anywhere in the <b>Console</b> (or <b>View → OS Drop History</b>) to open the <b>OS drop history</b>: every drop this session listed with its routed zone (<code>timeline/strip</code>, <code>console/header</code>, <code>viewport</code>, …) and its outcome, newest first, color-coded per row — <b>green</b> for applied/loading, <b>amber</b> for steered/ignored/rejected, <b>red</b> for a failed load — with a hover <b>tooltip</b> showing the full path and the exact drop time. Clicking a record <b>re-runs</b> the action through the same route, and a record that was rejected (wrong zone/panel/type) falls back to the file's canonical action (e.g. audio that was steered off the lanes actually loads the track), with <code>Clear history</code> to reset the list. Each row is also a <b>drag source</b> carrying the same payload as the asset browser: drag a row onto any panel to <b>re-dispatch it elsewhere</b> — the Timeline, Console and Assets panels accept it (with an amber hover border) and route it exactly like an OS drop at the cursor (the waveform strip loads audio, the lanes steer it, the Console header opens the scratch view, the log list filters, Assets browses the file's folder), the viewport applies it through the same judged route as an OS drop (toast + history record included), and Sprite nodes take textures — so a misdropped file can be retried on the right panel, with every re-dispatch itself recorded as a new history entry. A press-drag never accidentally triggers the click-to-re-run. The history is <b>persisted</b> to <code>data/editor_state.json</code> (capped at 200, each entry's timestamp stored as wall-clock epoch seconds) — saved on a 500 ms <b>trailing debounce</b> (a burst of drops — e.g. a multi-file OS drop — writes the JSON once when the window elapses, not once per file, and any save still pending is flushed immediately when the editor exits), so a crash mid-iteration doesn't lose the trail: the next launch restores it and every record stays re-runnable and re-draggable, with <code>Clear history</code> also clearing the persisted copy. When a restored history is non-empty, the editor pushes a blue <b>session-resume marker</b> (<code>14:32:07  session resumed from 2026-08-06</code>) at boot — display-only (no re-run, no drag), so relaunches are visible in the trail. The list <b>auto-refreshes live</b> while the popup is open — files dropped into or removed from the scanned folders appear without pressing Rescan, on a slow cadence scaled to the scan cost so huge roots don't hitch the editor, with an <code>updated</code> flash in the footer confirming the change. Every category <b>remembers its own scan root + last pick</b> (and the last-used category) in <code>data/editor_state.json</code>, so each picker reopens where you were; the <b>panel visibility</b> (Toolbar / Hierarchy / Inspector / Timeline / Console / Assets / Profiler — whatever you hid via the <code>View</code> menu) is persisted too, so a hidden Toolbar stays hidden next launch instead of resurfacing (a state save taken while Fullscreen Preview is hiding the panels persists the pre-preview layout), or stop audio entirely (the popup's <code>No track (silent)</code> button) — the swap happens safely while the audio device is paused and the new track starts at the current show time. Loading a track is <b>asynchronous</b>: the decode runs on a background worker (a <code>decoding …</code> spinner shows in the popup) while the current source keeps playing, and the swap commits with a single device stop/start when ready — large files never block the editor UI. Picking a new track while one is decoding supersedes it cleanly (no spurious failures logged). The chosen track is persisted in <code>data/editor_state.json</code> and restored on the next editor launch (suppressed by <code>--no-track</code>; a missing file warns and keeps the current source). The track browser's <b>scan root + last picked file</b> persist there too (saved whenever the browser closes), so reopening it lands where you were — even in a <code>--no-track</code> session. Scrubbing the timeline (and <code>Restart</code>) re-syncs the music to the show position.</td></tr>
+              <tr><td><code>--editor-seconds=N</code></td><td>With <code>--editor</code>: auto-close after N seconds — a CI smoke mode that boots the editor, runs the show inside it, and exits 0.</td></tr>
+              <tr><td><code>--help</code></td><td>Print all flags.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Keyboard controls</h2>
+        <p class="sec-sub">Transport and debug controls. These drive the director's timeline — the same transport is available programmatically to scripts.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Key</th><th>Action</th></tr></thead>
+            <tbody>
+              <tr><td><kbd>ESC</kbd></td><td>Quit</td></tr>
+              <tr><td><kbd>Space</kbd></td><td>Pause / resume the show clock</td></tr>
+              <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>Scrub a bar (beat-snapped on the BPM)</td></tr>
+              <tr><td><kbd>R</kbd></td><td>Restart at 0:00</td></tr>
+              <tr><td><kbd>0</kbd> / <kbd>1</kbd></td><td>Jump to previous / next section</td></tr>
+              <tr><td><kbd>+</kbd> / <kbd>−</kbd></td><td>Speed up / slow down the show clock</td></tr>
+              <tr><td><kbd>M</kbd></td><td>Drop a marker at the current time</td></tr>
+              <tr><td><kbd>L</kbd></td><td>Toggle section loop</td></tr>
+              <tr><td><kbd>T</kbd> / <kbd>Shift+T</kbd></td><td>Switch the playing audio to the next / previous entry of the <code>--track</code> list, or the next track found on disk (<code>cwd</code>, <code>assets/</code>, <code>data/</code>) when no list was given — the decode is asynchronous (the show keeps playing, the swap commits when ready, the window title shows the track), <kbd>Shift+T</kbd> cycles backward; the console prints how many tracks are available at boot, and a <b>bottom-left on-screen readout</b> (the demo's caption style) shows <code>decoding …</code> then <code>track n/m: name</code> for a few seconds, fading in/out — no console needed</td></tr>
+              <tr><td><kbd>F2</kbd></td><td>Reload the demo script (live reload)</td></tr>
+              <tr><td><kbd>F11</kbd></td><td>Toggle fullscreen</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Validation</h2>
+        <p class="sec-sub">The repo ships with a battery of offline checks plus headless smokes — run the numbered list below before a release, in order.</p>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">terminal</span><span class="lang">bash</span></div>
+          <pre># 1. framework unit tests (script parser, timeline, animation, scene graph,
+#    JSON round-trips, and validation of every data file in data/)
+./build/Release/ns_fw_tests.exe
+
+# 2. compile every engine shader stage + the app's forward-lit program, then exit
+./build/Release/ns_demo.exe --check-shaders
+
+# 3. headless-ish 3D pipeline: OBJ import -> lit shader -> draw + pixel readback
+./build/Release/ns_demo.exe --check-models
+
+# 4. live-reload smoke: break + fix a temp shader; must keep-previous, then recompile
+./build/Release/ns_demo.exe --check-hotreload --no-track
+
+# 5. shadertoy pipeline: render every data/shadertoy/*.glsl offscreen + readback
+./build/Release/ns_demo.exe --check-shadertoy
+
+# 6. production checklist: script parses, every referenced asset resolves (GL-free)
+./build/Release/ns_demo.exe --check-production
+
+# 7. headless audio decode + analyser self-test
+./build/Release/ns_demo.exe --smoke-audio --track=music.mp3
+
+# 8. renderScale A/B: run the same script at two scales, diff the medians
+./build/Release/ns_demo.exe --demo=tmp_ab.nsd --perf-json=scale050.json --perf-seconds=14 --no-track --windowed
+./build/Release/ns_demo.exe --demo=tmp_ab.nsd --perf-json=scale100.json --perf-seconds=14 --no-track --windowed
+#   -> scale050.json vs scale100.json: shadertoy medianMs per effect
+
+# 7. renderScale A/B: run the same script at two scales, diff the medians
+./build/Release/ns_demo.exe --demo=tmp_ab.nsd --perf-json=scale050.json --perf-seconds=14 --no-track --windowed
+./build/Release/ns_demo.exe --demo=tmp_ab.nsd --perf-json=scale100.json --perf-seconds=14 --no-track --windowed
+#   -> scale050.json vs scale100.json: shadertoy medianMs per effect</pre>
+        </div>
+        <div class="callout tip">
+          <span class="ct-label">Tip</span>
+          <p>Because the demo is data, "the demo" and "the engine" can be validated independently: the tests prove the data files parse, <code>--check-shaders</code> proves the shaders compile, and running the app proves the composition.</p>
+        </div>
+        <p class="sec-sub">The editor's own authoring flows are covered by env-flag headless smokes run under <code>--editor --editor-seconds=10</code>: <code>NS_EDITOR_SCENE_SMOKE=1</code> (Add Scene appends + reloads + activates), <code>NS_EDITOR_ASSET_SMOKE=1</code> (New Asset creates a material, post preset and scene, rejects a duplicate name through the dialog's exists gate, and confirms the one-click free-name suggestion is actually free), <code>NS_EDITOR_AUDIO_SMOKE=1</code> (silence → WAV → silence track swap), and <code>NS_EDITOR_SCRUB_SMOKE=1</code> (scrubbing re-establishes the scene at the target: a forward scrub into Cathedral activates it, a backward scrub into Intro re-establishes it).</p>
+        <div class="callout warn">
+          <span class="ct-label">Something broke?</span>
+          <p>See the <a href="troubleshooting.html">troubleshooting page →</a> for shader compile errors, the silent no-track mode, GLFW fetch failures, plugin load errors, and how the <code>NULLSECTOR_*_DIR</code> environment overrides work.</p>
+        </div>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

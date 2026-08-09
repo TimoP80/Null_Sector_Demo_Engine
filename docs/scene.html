@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scene Graph — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">05</span> Authoring · Scene Graph</p>
+        <h1>Scene Graph</h1>
+        <p class="lede">A proper node hierarchy with local and world transforms, visibility, tags and layers. Ten node types carry the payloads the renderers read — the graph itself is GL-free and serializes to JSON.</p>
+      </header>
+
+      <section>
+        <h2>Core features</h2>
+        <div class="grid">
+          <div class="card"><span class="glyph">⌘</span><h3>Hierarchy</h3><p>Parent/child trees; world matrices recompute lazily down the dirty chain.</p></div>
+          <div class="card"><span class="glyph">◈</span><h3>Transforms</h3><p>Local position, quaternion rotation, scale (or euler degrees), full TRS matrices.</p></div>
+          <div class="card"><span class="glyph">◉</span><h3>Visibility</h3><p><code>visible</code> + <code>enabled</code>; <code>enabled</code> propagates to children, <code>isActive()</code> checks the whole ancestor chain.</p></div>
+          <div class="card"><span class="glyph">◫</span><h3>Tags &amp; layers</h3><p>Tag any node and query across the tree; assign layers for selective rendering.</p></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Node types</h2>
+        <p class="sec-sub">Each node carries a payload variant. The engine-side renderers read these; the director builds them from script commands or scene JSON.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Type</th><th>Payload</th><th>Key fields</th></tr></thead>
+            <tbody>
+              <tr><td><code>empty</code></td><td>—</td><td>Grouping / transform parent.</td></tr>
+              <tr><td><code>camera</code></td><td><code>CamData</code></td><td><code>fov</code>, <code>nearP</code>, <code>farP</code>, <code>target</code>, <code>rig</code> name.</td></tr>
+              <tr><td><code>light</code></td><td><code>LightData</code></td><td><code>type</code> (directional | point | spot), <code>color</code>, <code>intensity</code>, <code>range</code>, <code>angle</code>, <code>castShadow</code>.</td></tr>
+              <tr><td><code>mesh</code></td><td><code>MeshData</code></td><td><code>model</code> (OBJ path), <code>material</code> (name), <code>scale</code>, <code>lit</code>.</td></tr>
+              <tr><td><code>particles</code></td><td><code>ParticleData</code></td><td>vertex/fragment shaders, <code>count</code>, <code>renderScale</code>.</td></tr>
+              <tr><td><code>quad</code></td><td><code>QuadData</code></td><td><code>frag</code> shader, <code>handoff</code> (in-scene transition), <code>renderScale</code>, <code>mode</code>.</td></tr>
+              <tr><td><code>sprite</code></td><td><code>SpriteData</code></td><td><code>tex</code>, <code>color</code>, <code>opacity</code>, <code>size</code> (world units).</td></tr>
+              <tr><td><code>text</code></td><td><code>TextData</code></td><td><code>text</code>, <code>sizePx</code>, <code>font</code>, <code>style</code> (terminal | holo | glitch | neon | scan | dissolve | chrome | outline), <code>opacity</code>, <code>align</code>.</td></tr>
+              <tr><td><code>post</code></td><td><code>PostData</code></td><td><code>preset</code> — post preset name.</td></tr>
+              <tr><td><code>timeline</code></td><td><code>TimelineData</code></td><td><code>file</code> — a timeline JSON to attach.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Script commands</h2>
+        <p class="sec-sub">Scene-graph nodes are built directly in the DSL — the Asset Pipeline scene of the bundled demo builds an entire 3D set in five commands:</p>
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/demo.nsd — scene Model</span><span class="lang">nsd</span></div>
+          <pre>scene Model {
+    bars 10  intensity 0.5  chapter 2
+    title "Asset Pipeline"
+    camera Reticle { rig static; pos (0,1.2,7); target (0,0.5,0); fov 52 }
+    shader dataviz_bg.frag
+    post preset clean
+
+    load material chrome
+    load material neon
+    load model terrain.obj
+    load model gem.obj
+
+    mesh terrain { model terrain.obj; material chrome; pos (0,-0.5,0) }
+    mesh gem    { model gem.obj;    material neon;  pos (2.2,1.4,0); scale (0.8,0.8,0.8) }
+
+    light sun  { type directional; color (1,0.92,0.78); intensity 2.0 }
+    light fill { type point;       color (0.4,0.6,1);  intensity 6; range 14 }
+
+    sprite halo { tex ghost_logo.png; pos (0,1.9,-4); size (5,2.5,1); opacity 0.55 }
+    text caption { text "3D // PBR // OBJ IMPORT"; pos (0,0.55,0); size 26; style neon }
+
+    at 1 { anim gemSpin node:gem.euler linear { 0 (0,0,0); 9 (0,360,0) } }
+    at 1 { anim gridBob node:terrain.pos bounce { 0 (0,-0.5,0); 4 (0,-0.35,0); 8 (0,-0.5,0) } }
+    at 9 { transition fade 1 }
+}</pre>
+        </div>
+      </section>
+
+      <section>
+        <h2>JSON scene format</h2>
+        <p class="sec-sub">The whole graph serializes to JSON (<code>data/scenes/*.json</code>, asset kind <code>scene</code>) — hierarchy, transforms, tags and payloads all round-trip. Excerpt from the bundled <code>lightbox.json</code>:</p>
+        <div class="code" data-lang="json">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/scenes/lightbox.json</span><span class="lang">json</span></div>
+          <pre>{
+  "name": "world",
+  "type": "empty",
+  "pos": [0, 0, 0],
+  "children": [
+    {
+      "name": "lightrig",
+      "type": "empty",
+      "pos": [0, 2, 0],
+      "children": [
+        { "name": "sun", "type": "light", "pos": [0, 8, 6],
+          "light": { "type": "directional", "color": [1.0, 0.92, 0.78],
+                     "intensity": 2.0, "range": 10.0, "angle": 45.0,
+                     "shadow": false } },
+        { "name": "fill", "type": "light", "pos": [4, 3, -4],
+          "light": { "type": "point", "color": [0.4, 0.6, 1.0],
+                     "intensity": 6.0, "range": 14.0 } }
+      ]
+    },
+    { "name": "terrain", "type": "mesh", "pos": [0, -0.5, 0],
+      "tags": ["ground", "lit"],
+      "mesh": { "model": "terrain.obj", "material": "chrome", "scale": 1.0, "lit": true } },
+    { "name": "caption", "type": "text", "pos": [0, 2.3, 0],
+      "text": { "text": "3D // PBR // OBJ IMPORT", "size": 26,
+                "style": "neon", "opacity": 1.0 } }
+  ]
+}</pre>
+        </div>
+        <div class="callout tip">
+          <span class="ct-label">Tip</span>
+          <p>Script <code>mesh</code>/<code>sprite</code>/<code>text</code>/<code>light</code> commands are the fast path for one-off nodes; scene JSON is the right tool for reusable, artist-authored sets.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>API surface</h2>
+        <ul>
+          <li><code>SceneGraph::addNode(name, type, payload, parent)</code>, <code>find(name)</code> (DFS), <code>findTag(tag)</code>, <code>nodesOf(type, activeOnly)</code>.</li>
+          <li><code>SceneNode::setPos/setRot/setScale/setEuler</code>, <code>computeLocal()</code>, <code>updateWorld(parentDirty)</code>, <code>isActive()</code>.</li>
+          <li><code>SceneGraph::update()</code> recomputes all world matrices once per frame; <code>walk(fn)</code> visits depth-first, parents first.</li>
+        </ul>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

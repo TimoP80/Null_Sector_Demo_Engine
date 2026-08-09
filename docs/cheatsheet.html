@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cheat Sheet — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">⚡</span> Overview · Quick reference</p>
+        <h1>One-Page Cheat Sheet</h1>
+        <p class="lede">The whole DSL on one page. Every syntax form, time format, command, rig, interpolator and uniform name — for when you know what to write but can't remember how.</p>
+      </header>
+
+      <section>
+        <h2>Minimal demo</h2>
+        <div class="code" data-lang="glsl">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/my_demo.nsd</span><span class="lang">nsd</span></div>
+          <pre>demo "MY DEMO" {
+    bpm 128
+    duration 60
+}
+
+scene Intro {
+    bars 8   intensity 0.5  chapter 0
+    title "Cold Open"
+    camera Cam1 { rig static; pos (0,0,4); target (0,0,0); fov 60 }
+    show myeffect
+    play music
+    fade in 2
+    at 7 { transition fade 1 }
+}
+
+at 0    { show Intro;     marker ColdOpen }
+at 15.2 { show SceneTwo;  marker B }</pre>
+        </div>
+      </section>
+
+      <div class="cheat-grid">
+        <section>
+          <h2>Time formats</h2>
+          <p class="sec-sub">Anywhere a time is expected: <code>at</code>, <code>anim</code> keys, <code>marker</code>, <code>jump</code>.</p>
+          <div class="tbl-wrap">
+            <table class="tbl compact">
+              <thead><tr><th>Write</th><th>Means</th></tr></thead>
+              <tbody>
+                <tr><td><code>12.5</code></td><td>Seconds</td></tr>
+                <tr><td><code>1:05.0</code></td><td>Clock time (mm:ss.ms)</td></tr>
+                <tr><td><code>66.667s</code></td><td>Seconds, explicit</td></tr>
+                <tr><td><code>beat 128</code></td><td>Beat number @ bpm</td></tr>
+                <tr><td><code>bar 32</code></td><td>Bar number (4 beats)</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="cheat-note">Bar/beat resolve against the <code>demo { bpm }</code> header.</p>
+        </section>
+
+        <section>
+          <h2>Values</h2>
+          <p class="sec-sub">Command args and <code>{ }</code> options.</p>
+          <div class="tbl-wrap">
+            <table class="tbl compact">
+              <thead><tr><th>Write</th><th>Means</th></tr></thead>
+              <tbody>
+                <tr><td><code>216</code> / <code>0.45</code></td><td>Number</td></tr>
+                <tr><td><code>"Awakening"</code></td><td>String</td></tr>
+                <tr><td><code>(0, 1.2, 7)</code></td><td>Vector (2–4 parts)</td></tr>
+                <tr><td><code>fov (50, 58)</code></td><td>Ramp: base → target over build-up</td></tr>
+                <tr><td><code>{ rig orbit; radius 4.5 }</code></td><td>Named options</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="cheat-note">Comments: <code>//</code>, <code>#</code>, <code>/* … */</code>.</p>
+        </section>
+      </div>
+
+      <section>
+        <h2>Commands</h2>
+        <p class="sec-sub">Usable in <code>at</code> blocks and <code>scene</code> setup.</p>
+        <div class="tbl-wrap">
+          <table class="tbl compact">
+            <thead><tr><th>Command</th><th>Example</th><th>Does</th></tr></thead>
+            <tbody>
+              <tr><td><code>show</code> / <code>hide</code></td><td><code>show tunnel { mode 1 }</code></td><td>Activate / deactivate effect by name</td></tr>
+              <tr><td><code>load</code></td><td><code>load shadertoy plasma.glsl</code></td><td>Import: shadertoy · model · material · plugin · effect</td></tr>
+              <tr><td><code>shader</code></td><td><code>shader dataviz_bg.frag</code></td><td>Swap the fullscreen backdrop shader</td></tr>
+              <tr><td><code>camera</code></td><td><code>camera NetCam { rig orbit; radius 4.5 }</code></td><td>Create / switch camera rig</td></tr>
+              <tr><td><code>play</code></td><td><code>play music</code></td><td>Start the track</td></tr>
+              <tr><td><code>fade</code></td><td><code>fade in 2</code> · <code>fade out 2</code></td><td>Fade from / to black</td></tr>
+              <tr><td><code>transition</code></td><td><code>transition fade 1</code></td><td>Scene transition over N s</td></tr>
+              <tr><td><code>post</code></td><td><code>post preset cinematic</code> · <code>post legacy</code></td><td>Switch post chain (preset / legacy / inline)</td></tr>
+              <tr><td><code>anim</code></td><td><code>anim spin node:gem.euler linear { 0 (0,0,0); 9 (0,360,0) }</code></td><td>Define &amp; play keyframed animation</td></tr>
+              <tr><td><code>marker</code></td><td><code>marker Awakening</code></td><td>Named cue point</td></tr>
+              <tr><td><code>speed</code></td><td><code>speed 0.5</code></td><td>Scale show clock</td></tr>
+              <tr><td><code>loop</code></td><td><code>loop section</code></td><td>Loop show or section</td></tr>
+              <tr><td><code>jump</code></td><td><code>jump 40</code></td><td>Seek timeline to time</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="cheat-grid">
+        <section>
+          <h2>Scene-graph nodes</h2>
+          <p class="sec-sub">Built inside scene setup.</p>
+          <div class="tbl-wrap">
+            <table class="tbl compact">
+              <thead><tr><th>Node</th><th>Example</th></tr></thead>
+              <tbody>
+                <tr><td><code>mesh</code></td><td><code>mesh gem { model gem.obj; material neon; pos (2.2,1.4,0); scale (0.8,0.8,0.8) }</code></td></tr>
+                <tr><td><code>sprite</code></td><td><code>sprite halo { tex ghost_logo.png; pos (0,1.9,-4); size (5,2.5,1); opacity 0.55 }</code></td></tr>
+                <tr><td><code>text</code></td><td><code>text cap { text "HELLO"; pos (0,0.5,0); size 26; style neon }</code></td></tr>
+                <tr><td><code>light</code></td><td><code>light sun { type directional; color (1,0.92,0.78); intensity 2.0 }</code></td></tr>
+                <tr><td><code>particles</code></td><td><code>particles dust { count 5000 }</code></td></tr>
+                <tr><td><code>empty</code></td><td><code>empty rig { pos (0,2,0) }</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section>
+          <h2>Camera rigs</h2>
+          <p class="sec-sub"><code>camera Name { rig TYPE; … }</code></p>
+          <div class="tbl-wrap">
+            <table class="tbl compact">
+              <thead><tr><th>Rig</th><th>Motion</th></tr></thead>
+              <tbody>
+                <tr><td><code>static</code></td><td>Fixed pose</td></tr>
+                <tr><td><code>drift</code></td><td>Slow procedural float</td></tr>
+                <tr><td><code>fly</code></td><td>Forward flight</td></tr>
+                <tr><td><code>nave</code></td><td>Gliding descent</td></tr>
+                <tr><td><code>orbit</code> / <code>spiral</code></td><td>Orbit (spiral = tighter, faster)</td></tr>
+                <tr><td><code>hover</code></td><td>Close-up with tiny drift</td></tr>
+                <tr><td><code>city</code></td><td>High grid flyover</td></tr>
+                <tr><td><code>descend</code></td><td>Slow descending drift</td></tr>
+                <tr><td><code>path</code></td><td>Catmull-Rom spline</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <div class="cheat-grid">
+        <section>
+          <h2>Rig options</h2>
+          <p class="sec-sub">Scalars accept <code>N</code> or <code>(base,target)</code> ramps.</p>
+          <div class="tbl-wrap">
+            <table class="tbl compact">
+              <thead><tr><th>Option</th><th>Rigs</th></tr></thead>
+              <tbody>
+                <tr><td><code>pos (x,y,z)</code> · <code>target (x,y,z)</code></td><td>all</td></tr>
+                <tr><td><code>fov N</code></td><td>all</td></tr>
+                <tr><td><code>speed N</code></td><td>fly · city · nave · descend</td></tr>
+                <tr><td><code>radius N</code> · <code>omega N</code> · <code>rDrift N</code></td><td>orbit · spiral</td></tr>
+                <tr><td><code>amp N</code> · <code>freq N</code></td><td>drift · hover</td></tr>
+                <tr><td><code>sway (x,y,z)</code></td><td>fly · orbit · city · …</td></tr>
+                <tr><td><code>handheld N</code></td><td>all</td></tr>
+                <tr><td><code>dofFocus N</code> · <code>dofAperture N</code></td><td>all</td></tr>
+                <tr><td><code>buildUp (start,end)</code></td><td>all (ramps)</td></tr>
+                <tr><td><code>pathDuration N</code> · <code>anticipation N</code></td><td>path</td></tr>
+                <tr><td><code>descendCap N</code> · <code>descendRate N</code></td><td>descend</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section>
+          <h2>Interpolators</h2>
+          <p class="sec-sub">Keyframe rows: <code>time value [interp]</code>.</p>
+          <div class="tbl-wrap">
+            <table class="tbl compact">
+              <thead><tr><th>Name</th><th>Character</th></tr></thead>
+              <tbody>
+                <tr><td><code>linear</code></td><td>Constant velocity</td></tr>
+                <tr><td><code>smooth</code></td><td>Smoothstep (default)</td></tr>
+                <tr><td><code>cubic</code></td><td>Catmull-Rom spline</td></tr>
+                <tr><td><code>bezier</code></td><td>Cubic Bézier handles</td></tr>
+                <tr><td><code>ease-in</code> / <code>ease-out</code> / <code>ease-in-out</code></td><td>Accelerate / decelerate / both</td></tr>
+                <tr><td><code>bounce</code></td><td>Overshoot + rebound</td></tr>
+                <tr><td><code>elastic</code></td><td>Springy wobble</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <div class="cheat-grid">
+        <section>
+          <h2>Animation targets</h2>
+          <p class="sec-sub"><code>anim NAME target.property [interp] { keys }</code></p>
+          <div class="tbl-wrap">
+            <table class="tbl compact">
+              <thead><tr><th>Target</th><th>Properties</th></tr></thead>
+              <tbody>
+                <tr><td><code>camera</code></td><td><code>pos</code> · <code>fov</code> · <code>target</code></td></tr>
+                <tr><td><code>node:&lt;name&gt;</code></td><td><code>pos</code> · <code>euler</code> · <code>scale</code> · <code>opacity</code> · <code>color</code></td></tr>
+                <tr><td><code>light:&lt;name&gt;</code></td><td><code>intensity</code> · <code>color</code></td></tr>
+                <tr><td><code>effect:&lt;name&gt;</code></td><td><code>uniform:&lt;uName&gt;</code></td></tr>
+                <tr><td><code>post</code></td><td><code>exposure</code> · <code>bloom</code> · <code>glitch</code></td></tr>
+                <tr><td><code>text:&lt;name&gt;</code></td><td><code>opacity</code> · values</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section>
+          <h2>Post passes</h2>
+          <p class="sec-sub">Preset JSON: <code>data/post/*.json</code>.</p>
+          <div class="tbl-wrap">
+            <table class="tbl compact">
+              <thead><tr><th>Pass</th><th>Key params</th></tr></thead>
+              <tbody>
+                <tr><td><code>dof</code> · <code>fog</code></td><td>depth — first</td></tr>
+                <tr><td><code>bloom</code></td><td><code>threshold</code> · <code>intensity</code></td></tr>
+                <tr><td><code>chromatic</code></td><td><code>amount</code></td></tr>
+                <tr><td><code>vignette</code></td><td><code>amount</code> · <code>curve</code></td></tr>
+                <tr><td><code>grain</code> · <code>scanlines</code> · <code>pixelate</code></td><td><code>amount</code></td></tr>
+                <tr><td><code>grade</code></td><td><code>tonemap</code> · <code>saturation</code> · <code>exposure</code></td></tr>
+                <tr><td><code>fxaa</code></td><td>— always last</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <div class="cheat-grid">
+        <section>
+          <h2>Audio uniforms</h2>
+          <p class="sec-sub">Declared in any shader; filled by the analyser.</p>
+          <div class="tbl-wrap">
+            <table class="tbl compact">
+              <thead><tr><th>Uniform</th><th>Source</th></tr></thead>
+              <tbody>
+                <tr><td><code>uBass</code> · <code>uMid</code> · <code>uTreble</code></td><td>FFT bands (<code>uHigh</code> is an alias of the treble band)</td></tr>
+                <tr><td><code>uKick</code> · <code>uBeat</code></td><td>Beat / kick detection</td></tr>
+                <tr><td><code>uBar</code></td><td>Downbeat pulse (fires each bar — sync your drops to the music grid)</td></tr>
+                <tr><td><code>uVolume</code></td><td>Overall level</td></tr>
+                <tr><td><code>uTime</code></td><td>Show clock</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section>
+          <h2>Shadertoy uniforms</h2>
+          <p class="sec-sub">Provided by the importer.</p>
+          <div class="tbl-wrap">
+            <table class="tbl compact">
+              <thead><tr><th>Uniform</th><th>Meaning</th></tr></thead>
+              <tbody>
+                <tr><td><code>iTime</code> · <code>iTimeDelta</code> · <code>iFrame</code></td><td>Clock / delta / frame</td></tr>
+                <tr><td><code>iResolution</code></td><td>Target size</td></tr>
+                <tr><td><code>iMouse</code> · <code>iDate</code></td><td>Cursor / wall clock</td></tr>
+                <tr><td><code>iChannel0…3</code></td><td>Textures</td></tr>
+                <tr><td><code>iChannelTime[4]</code></td><td>Per-channel time</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="cheat-note">Pass markers: <code>// pass: common</code> · <code>buffer_a…d</code> · <code>image</code></p>
+        </section>
+      </div>
+
+      <div class="callout tip">
+        <span class="ct-label">More depth</span>
+        <p>Each row links somewhere deeper — see <a href="dsl.html">the scripting DSL</a>, <a href="timeline.html">timeline</a>, <a href="animation.html">animation</a>, <a href="scene.html">scene graph</a>, <a href="cameras.html">camera rigs</a>, <a href="postfx.html">post FX</a> and <a href="shadertoy.html">Shadertoy import</a> for full details, examples and JSON formats.</p>
+      </div>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

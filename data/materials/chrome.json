@@ -1,0 +1,9 @@
+{
+  "name": "chrome",
+  "baseColor": [0.85, 0.9, 1.0, 1.0],
+  "metallic": 1.0,
+  "roughness": 0.08,
+  "ao": 1.0,
+  "emission": [0.0, 0.0, 0.0],
+  "opacity": 1.0
+}
