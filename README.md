@@ -1,3 +1,5 @@
+<img width="1619" height="972" alt="ChatGPT Image 6 8 2026 klo 14 49 43" src="https://github.com/user-attachments/assets/54598671-b872-4302-bf12-987459b078bc" />
+
 # Null Sector Demo Engine
 
 A data-driven C++17/OpenGL demoscene production engine. The show is **data** — a
