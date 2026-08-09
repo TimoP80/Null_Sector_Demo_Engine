@@ -43,6 +43,10 @@ add_library(ns_framework STATIC
   src/framework/camera/camerarig.cpp
   src/framework/resources/filewatcher.cpp
   src/framework/resources/assetmanager.cpp
+  src/framework/vfs/vfs.cpp
+  src/framework/vfs/directoryfs.cpp
+  src/framework/vfs/nspack.cpp
+  src/framework/vfs/packagefs.cpp
 )
 target_include_directories(ns_framework PUBLIC src)
 target_compile_definitions(ns_framework PUBLIC
@@ -121,6 +125,7 @@ if(NS_BUILD_APP)
     src/app/appassets.cpp
     src/app/effectreg.cpp
     src/app/model.cpp
+    src/app/packer.cpp
     src/app/modelcheck.cpp
     src/app/poststack.cpp
     src/app/prodcheck.cpp

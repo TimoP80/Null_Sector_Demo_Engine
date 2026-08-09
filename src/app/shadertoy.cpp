@@ -3,6 +3,7 @@
 #include "app/shadertoyparse.hpp"
 #include "engine/paths.hpp"
 #include "engine/renderer.hpp"
+#include "framework/vfs/vfs.hpp"
 #include "framework/core/log.hpp"
 
 #include <chrono>
@@ -19,7 +20,12 @@ namespace ns {
 // helpers
 // ---------------------------------------------------------------------------
 namespace {
+/** read text through the runtime VFS, with a direct-file fallback for
+ *  absolute paths (a shader dropped into the editor from outside the tree). */
 std::string readTextFile(const std::string& path) {
+  std::string out = runtimeFS().readText(path);
+  if (out.empty() && !std::filesystem::is_regular_file(path)) return out;
+  if (!out.empty()) return out;
   std::ifstream f(path, std::ios::binary);
   if (!f) return "";
   std::ostringstream ss;
@@ -77,7 +83,7 @@ unsigned ShadertoyFX::linkProgram(const std::vector<unsigned>& stages, const std
 // ---------------------------------------------------------------------------
 bool ShadertoyFX::parseSource() {
   passes_.clear();
-  std::string full = readTextFile(dataDir() + "/shadertoy/" + file_);
+  std::string full = readTextFile("data/shadertoy/" + file_);
   // an absolute file_ (a shader dropped in the editor from OUTSIDE
   // data/shadertoy, e.g. the exe dir) reads directly instead of
   // concatenating onto the shadertoy dir
@@ -227,10 +233,9 @@ void ShadertoyFX::init(EffectContext& ctx) {
   // loud error (placeholder fallback), and a present file is actually
   // decoded - silently binding a blank 2x2 for either case hid both.
   if (!texPath_.empty()) {
-    const std::string tp = dataDir() + "/textures/" + texPath_;
+    const std::string tp = "data/textures/" + texPath_;
     Texture* loaded = nullptr;
-    std::error_code ec;
-    if (!std::filesystem::exists(tp, ec)) {
+    if (!runtimeFS().exists(tp)) {
       Log::error("SHADERTOY", "iChannel0 texture not found: " + tp + " - using 2x2 placeholder");
     } else {
       loaded = AppAssets::loadTexture(tp);  // logs its own stbi reason on failure

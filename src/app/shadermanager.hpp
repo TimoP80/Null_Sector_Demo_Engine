@@ -19,11 +19,27 @@
 #pragma once
 
 #include "engine/gl.hpp"
+#include <chrono>
 #include <filesystem>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
+
+
+/** convert a std::filesystem file time to epoch seconds (portable C++17) */
+inline double fileTimeToEpochSec(const std::filesystem::file_time_type& t) {
+  const auto sys = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+      t - std::filesystem::file_time_type::clock::now() +
+      std::chrono::system_clock::now());
+  return std::chrono::duration<double>(sys.time_since_epoch()).count();
+}
+/** current wall-clock time in epoch seconds */
+inline double nowEpochSec() {
+  return std::chrono::duration<double>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
 
 namespace ns {
 
@@ -43,7 +59,7 @@ struct ProgramState {
   std::vector<std::string> deps;         // resolved include files (for reload)
   std::vector<std::string> missingDeps;  // includes that could not be found
   std::map<std::string, int> locs;       // name -> location cache
-  std::filesystem::file_time_type mtime_;      // last successful compile time
+  double mtime_ = 0.0;                        // last successful compile (epoch secs)
   std::filesystem::file_time_type lastAttempt_;  // last (re)compile attempt (retry throttle)
 
   int loc(const char* name) {

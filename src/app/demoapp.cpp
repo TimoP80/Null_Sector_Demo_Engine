@@ -11,6 +11,7 @@
 #include "engine/paths.hpp"
 #include "engine/postprocess.hpp"
 #include "framework/core/json.hpp"
+#include "framework/vfs/vfs.hpp"
 #include "framework/core/log.hpp"
 
 #include <algorithm>
@@ -18,12 +19,31 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <functional>
 #include <thread>
 
 namespace ns {
 
 static std::string dataDir() { return AppAssets::dataDir(); }
+
+/** read a script through the runtime VFS, falling back to a direct file
+ *  read for absolute editor paths. Returns "" when neither works. */
+static std::string readScriptText(const std::string& path) {
+  std::string text = runtimeFS().readText(path);
+  if (text.empty()) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec) && !ec) {
+      std::ifstream f(path, std::ios::binary);
+      if (f) {
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        text = ss.str();
+      }
+    }
+  }
+  return text;
+}
 
 DemoApp::~DemoApp() { delete cineText_; }
 
@@ -67,9 +87,13 @@ void DemoApp::init(const Input& in) {
   // timeline's data-driven schedule are correct from the very first frame
   // (previously they silently fell back to the built-in schedule until the
   // first live reload).
-  if (!script_.load(in_.scriptPath)) {
-    throw std::runtime_error("demo script not found: " + in_.scriptPath +
-                             " (use --demo=PATH or place data/demo.nsd next to the exe)");
+  {
+    const std::string text = readScriptText(in_.scriptPath);
+    if (text.empty()) {
+      throw std::runtime_error("demo script not found: " + in_.scriptPath +
+                               " (use --demo=PATH or place data/demo.nsd next to the exe)");
+    }
+    script_.loadText(text, in_.scriptPath);
   }
   script_.build(editor_);
   buildSections();
@@ -721,7 +745,7 @@ void DemoApp::applySample(const AnimSample& s) {
 // post presets + fade
 // ---------------------------------------------------------------------------
 void DemoApp::loadPreset(const std::string& name) {
-  const std::string path = dataDir() + "/post/" + name + ".json";
+  const std::string path = "data/post/" + name + ".json";
   if (!post_->loadPresetFile(path, shaders_)) {
     Log::error("POST", "preset load failed: " + path);
     return;
@@ -804,7 +828,8 @@ void DemoApp::pollLiveReload(const std::vector<std::string>& changed) {
 void DemoApp::reloadScript() {
   try {
     ScriptEngine fresh;
-    if (!fresh.load(in_.scriptPath)) {
+    const std::string text = readScriptText(in_.scriptPath);
+    if (text.empty() || !fresh.loadText(text, in_.scriptPath)) {
       Log::error("RELOAD", "script reload failed (kept previous)");
       return;
     }
@@ -922,7 +947,7 @@ int DemoApp::runHotReloadCheck() {
     while (hrNow() < touchDeadline) {
       std::error_code mec;
       const auto mt = std::filesystem::last_write_time(file, mec);
-      if (!mec && mt > st->mtime_) {
+      if (!mec && fileTimeToEpochSec(mt) > st->mtime_) {
         newer = true;
         break;
       }
@@ -1034,13 +1059,14 @@ void DemoApp::renderEffects() {
 }
 
 void DemoApp::loadMaterial(const std::string& name) {
-  const std::string path = dataDir() + "/materials/" + name + ".json";
-  if (!std::filesystem::exists(path)) {
+  const std::string path = "data/materials/" + name + ".json";
+  const std::string text = runtimeFS().readText(path);
+  if (text.empty()) {
     Log::warn("ASSET", "material not found: " + path);
     return;
   }
   try {
-    const Value v = Json::parseFile(path);
+    const Value v = Json::parseText(text);
     materials_[name] = Material::fromJson(v);
     Log::info("ASSET", "material '" + name + "' loaded");
   } catch (const std::exception& e) {
@@ -1051,7 +1077,7 @@ void DemoApp::loadMaterial(const std::string& name) {
 void DemoApp::editorLoadTexture(const std::string& name) {
   if (name.empty()) return;
   // warm the asset-manager cache for the sprite pipeline (data/textures)
-  void* h = assets_.acquire(dataDir() + "/textures/" + name, "texture");
+  void* h = assets_.acquire("data/textures/" + name, "texture");
   if (!h) {
     Log::error("EDITOR", "texture load failed: " + name);
     return;
@@ -1081,7 +1107,7 @@ void DemoApp::loadModelFile(const std::string& file) {
   auto it = modelCache_.find(file);
   if (it != modelCache_.end()) return;
   auto m = std::make_shared<Model>();
-  const std::string path = dataDir() + "/models/" + file;
+  const std::string path = "data/models/" + file;
   if (!ObjImporter::load(path, *m)) {
     modelCache_[file] = nullptr;
     return;
@@ -1180,7 +1206,7 @@ void DemoApp::renderSpritesAndText() {
         if (it != spriteTex_.end()) {
           tex = it->second;
         } else {
-          void* h = assets_.acquire(dataDir() + "/textures/" + sd->tex, "texture");
+          void* h = assets_.acquire("data/textures/" + sd->tex, "texture");
           tex = static_cast<Texture*>(h);
           spriteTex_[sd->tex] = tex;
         }

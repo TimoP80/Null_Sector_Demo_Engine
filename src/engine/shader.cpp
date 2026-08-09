@@ -1,6 +1,7 @@
 #include "engine/shader.hpp"
 #include "engine/gl.hpp"
 #include "engine/paths.hpp"
+#include "framework/vfs/vfs.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -16,18 +17,27 @@ namespace ns {
 // precision statements. The shader bodies themselves are untouched, so the
 // native build renders the exact same GLSL as the web build.
 // ---------------------------------------------------------------------------
-static std::string readFile(const std::string& path, const std::string& label) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) throw std::runtime_error("shader file not found: " + label + " (" + path + ")");
-  std::ostringstream ss;
-  ss << f.rdbuf();
-  return ss.str();
-}
-
-/** directory the shaders live in: env override, else the baked source-tree
- *  path if present, else exe-dir/shaders, else ./shaders (packaged builds) */
-static std::string shaderDir() {
-  return resolveRuntimeDir("NULLSECTOR_SHADER_DIR", NULLSECTOR_SHADER_DIR, "shaders");
+/** read a shader source. `vpath` is the virtual path (shaders/...); when it
+ *  resolves empty through the runtime VFS and `rawPath` exists on the real
+ *  filesystem (an absolute path dropped from outside the tree), that wins -
+ *  the editor can load shaders living outside the project. */
+static std::string readFile(const std::string& vpath, const std::string& rawPath,
+                            const std::string& label) {
+  std::string src = runtimeFS().readText(vpath);
+  if (src.empty() && !rawPath.empty()) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(rawPath, ec) && !ec) {
+      std::ifstream f(rawPath, std::ios::binary);
+      if (f) {
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        src = ss.str();
+      }
+    }
+  }
+  if (src.empty())
+    throw std::runtime_error("shader file not found: " + label + " (" + vpath + ")");
+  return src;
 }
 
 std::string preprocessShaderSource(const std::string& src, const std::string& pathLabel) {
@@ -39,7 +49,9 @@ std::string preprocessShaderSource(const std::string& src, const std::string& pa
     if (line.find("precision ") == 0 && line.find(';') != std::string::npos) continue;
     // resolve #include <common> -> the shared library
     if (line.find("#include <common>") != std::string::npos) {
-      const std::string common = preprocessShaderSource(readFile(shaderDir() + "/common.glsl", "common.glsl"), "common.glsl");
+      const std::string common =
+          preprocessShaderSource(readFile("shaders/common.glsl", "", "common.glsl"),
+                                 "common.glsl");
       out << common << "\n";
       continue;
     }
@@ -77,16 +89,12 @@ Shader::Shader(const std::string& vertFile, const std::string& fragFile) {
   // a file argument that is itself an existing path (an absolute path from
   // the editor's asset-browser drop of a shader living OUTSIDE the shader
   // dir) reads directly instead of concatenating onto the shader dir
-  std::string vpath = shaderDir() + "/" + vertFile;
-  std::string fpath = shaderDir() + "/" + fragFile;
-  if (!std::filesystem::exists(fpath) && std::filesystem::exists(fragFile))
-    fpath = fragFile;
-  if (!std::filesystem::exists(vpath) && std::filesystem::exists(vertFile))
-    vpath = vertFile;
+  std::string vpath = "shaders/" + vertFile;
+  std::string fpath = "shaders/" + fragFile;
   const std::string vertSrc =
-      preprocessShaderSource(readFile(vpath, vertFile), vertFile);
+      preprocessShaderSource(readFile(vpath, vertFile, vertFile), vertFile);
   const std::string fragSrc =
-      preprocessShaderSource(readFile(fpath, fragFile), fragFile);
+      preprocessShaderSource(readFile(fpath, fragFile, fragFile), fragFile);
   const unsigned vs = compileStage(::gl::VERTEX_SHADER, vertSrc, vertFile);
   const unsigned fs = compileStage(::gl::FRAGMENT_SHADER, fragSrc, fragFile);
   program_ = ::glCreateProgram();

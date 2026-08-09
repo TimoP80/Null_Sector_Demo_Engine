@@ -1,10 +1,14 @@
 #include "app/appassets.hpp"
 #include "engine/paths.hpp"
+#include "framework/vfs/vfs.hpp"
 #include "framework/core/json.hpp"
 #include "framework/core/log.hpp"
 
 #include <fstream>
 #include <sstream>
+#include <iterator>
+#include <vector>
+#include <filesystem>
 
 // declarations only - the implementation lives in engine/assets.cpp
 #include "stb_image.h"
@@ -80,8 +84,23 @@ void AppAssets::init(AssetManager& am) {
 }
 
 Texture* AppAssets::loadTexture(const std::string& path) {
+  // the path is a virtual path (data/textures/...); the runtime VFS serves
+  // the bytes from the dev tree or the mounted package. Absolute paths from
+  // the editor's asset browser fall through to a direct file read.
+  std::vector<uint8_t> bytes = runtimeFS().read(path);
+  if (bytes.empty()) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec) && !ec) {
+      std::ifstream f(path, std::ios::binary);
+      if (f) bytes.assign(std::istreambuf_iterator<char>(f),
+                          std::istreambuf_iterator<char>());
+    }
+  }
   int w = 0, h = 0, comp = 0;
-  unsigned char* px = stbi_load(path.c_str(), &w, &h, &comp, 4);
+  unsigned char* px = bytes.empty()
+                          ? nullptr
+                          : stbi_load_from_memory(bytes.data(), (int)bytes.size(),
+                                                  &w, &h, &comp, 4);
   if (!px) {
     Log::error("ASSET", "texture load failed: " + path + " (" + (stbi_failure_reason() ? stbi_failure_reason() : "?") + ")");
     return nullptr;
@@ -102,9 +121,28 @@ Model* AppAssets::loadModel(const std::string& path) {
   return m;
 }
 
+/** read a JSON document through the runtime VFS (falling back to a direct
+ *  file read for absolute editor paths), then parse it. */
+static Value parseJsonPath(const std::string& path) {
+  std::string text = runtimeFS().readText(path);
+  if (text.empty()) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec) && !ec) {
+      std::ifstream f(path, std::ios::binary);
+      if (f) {
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        text = ss.str();
+      }
+    }
+  }
+  if (text.empty()) throw JsonError("cannot open JSON file: " + path);
+  return Json::parseText(text);
+}
+
 Material* AppAssets::loadMaterial(const std::string& path) {
   try {
-    const Value v = Json::parseFile(path);
+    const Value v = parseJsonPath(path);
     auto m = new Material();
     *m = Material::fromJson(v);
     return m;
@@ -116,7 +154,7 @@ Material* AppAssets::loadMaterial(const std::string& path) {
 
 SceneGraph* AppAssets::loadScene(const std::string& path) {
   try {
-    const Value v = Json::parseFile(path);
+    const Value v = parseJsonPath(path);
     auto g = new SceneGraph();
     g->fromJson(v);
     return g;
@@ -128,7 +166,7 @@ SceneGraph* AppAssets::loadScene(const std::string& path) {
 
 TimelineEditor* AppAssets::loadTimeline(const std::string& path) {
   try {
-    const Value v = Json::parseFile(path);
+    const Value v = parseJsonPath(path);
     auto t = new TimelineEditor();
     t->fromJson(v);
     return t;
@@ -140,7 +178,20 @@ TimelineEditor* AppAssets::loadTimeline(const std::string& path) {
 
 ScriptEngine* AppAssets::loadScript(const std::string& path) {
   auto s = new ScriptEngine();
-  if (!s->load(path)) {
+  std::string text = runtimeFS().readText(path);
+  if (text.empty()) {
+    // absolute editor path: direct read
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec) && !ec) {
+      std::ifstream f(path, std::ios::binary);
+      if (f) {
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        text = ss.str();
+      }
+    }
+  }
+  if (!s->loadText(text, path)) {
     delete s;
     return nullptr;
   }

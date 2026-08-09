@@ -22,6 +22,8 @@ Value parse(const std::string& text);
 
 /** read a JSON file from disk; throws JsonError (wrap for file errors) */
 Value parseFile(const std::string& path);
+/** parse a JSON document from an in-memory string (throws JsonError) */
+Value parseText(const std::string& text);
 
 /** serialize a Value to JSON text (pretty when indent >= 0) */
 std::string serialize(const Value& v, int indent = 2);

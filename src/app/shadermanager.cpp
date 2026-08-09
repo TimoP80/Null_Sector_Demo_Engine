@@ -1,5 +1,6 @@
 #include "app/shadermanager.hpp"
 #include "engine/paths.hpp"
+#include "framework/vfs/vfs.hpp"
 #include "framework/core/log.hpp"
 
 #include <algorithm>
@@ -15,11 +16,22 @@ namespace ns {
 static constexpr int kMaxIncludeDepth = 16;
 
 std::string ShaderManager::readFile(const std::string& path) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) return "";
-  std::ostringstream ss;
-  ss << f.rdbuf();
-  return ss.str();
+  // `path` is a virtual path (shaders/...) or, from the editor's asset
+  // browser, an absolute path to a file OUTSIDE the tree. Try the VFS
+  // first; a non-virtual path falls through to a direct read.
+  std::string src = runtimeFS().readText(path);
+  if (!src.empty() || path.find("shaders/") != 0) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec) && !ec) {
+      std::ifstream f(path, std::ios::binary);
+      if (f) {
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        src = ss.str();
+      }
+    }
+  }
+  return src;
 }
 
 std::string ShaderManager::resolveSource(const std::string& path, const std::string& shaderDir,
@@ -58,10 +70,10 @@ std::string ShaderManager::resolveSource(const std::string& path, const std::str
         // Resolve the include: try the literal name first (e.g. `#include
         // "noise.glsl"`), then append the .glsl extension so `#include
         // <common>` finds common.glsl (mirrors the engine Shader class).
-        std::string incPath = shaderDir + "/" + inc;
-        if (!std::filesystem::exists(incPath)) incPath = shaderDir + "/" + inc + ".glsl";
+        std::string incPath = "shaders/" + inc;
+        if (!runtimeFS().exists(incPath)) incPath = "shaders/" + inc + ".glsl";
         if (depth < kMaxIncludeDepth) {
-          out << resolveSource(incPath, shaderDir, deps, missing, depth + 1);
+          out << resolveSource(incPath, "shaders", deps, missing, depth + 1);
         } else {
           Log::warn("SHADER", "include depth exceeded at " + inc + " (cycle?)");
         }
@@ -74,31 +86,31 @@ std::string ShaderManager::resolveSource(const std::string& path, const std::str
 }
 
 bool ShaderManager::isDirty(const std::shared_ptr<ProgramState>& st) const {
-  const std::string dir = shaderDir_.empty() ? resolveRuntimeDir("NULLSECTOR_SHADER_DIR", NULLSECTOR_SHADER_DIR, "shaders") : shaderDir_;
-  std::error_code ec;
+  // deps are virtual paths; the VFS stats them (DirectoryFS reports real
+  // mtimes, PackageFS reports 0 = immutable so packaged shaders never dirty).
   for (const auto& dep : st->deps) {
-    if (!std::filesystem::exists(dep, ec)) return true;
-    const auto mt = std::filesystem::last_write_time(dep, ec);
-    if (mt > st->mtime_) return true;
+    const VFileInfo fi = runtimeFS().stat(dep);
+    if (!fi.exists) return true;
+    if (fi.mtime > st->mtime_) return true;
   }
   return false;
 }
 
 bool ShaderManager::compileProgram(const std::shared_ptr<ProgramState>& st) {
   const std::string dir = shaderDir_.empty() ? resolveRuntimeDir("NULLSECTOR_SHADER_DIR", NULLSECTOR_SHADER_DIR, "shaders") : shaderDir_;
-  std::string vpath = dir + "/" + st->vertKey;
-  std::string fpath = dir + "/" + st->fragKey;
+  std::string vpath = "shaders/" + st->vertKey;
+  std::string fpath = "shaders/" + st->fragKey;
   // a key that is itself an existing file (an absolute path from the editor's
   // asset-browser drop of a shader living OUTSIDE the shader dir) resolves
   // directly instead of silently compiling an empty source
-  if (!std::filesystem::exists(fpath) && std::filesystem::exists(st->fragKey))
+  if (!runtimeFS().exists(fpath) && std::filesystem::exists(st->fragKey))
     fpath = st->fragKey;
-  if (!std::filesystem::exists(vpath) && std::filesystem::exists(st->vertKey))
+  if (!runtimeFS().exists(vpath) && std::filesystem::exists(st->vertKey))
     vpath = st->vertKey;
 
   std::vector<std::string> vDeps, fDeps, vMiss, fMiss;
-  const std::string vsrc = resolveSource(vpath, dir, vDeps, vMiss, 0);
-  const std::string fsrc = resolveSource(fpath, dir, fDeps, fMiss, 0);
+  const std::string vsrc = resolveSource(vpath, "shaders", vDeps, vMiss, 0);
+  const std::string fsrc = resolveSource(fpath, "shaders", fDeps, fMiss, 0);
   st->deps.clear();
   st->deps.insert(st->deps.end(), vDeps.begin(), vDeps.end());
   st->deps.insert(st->deps.end(), fDeps.begin(), fDeps.end());
@@ -187,8 +199,7 @@ bool ShaderManager::compileProgram(const std::shared_ptr<ProgramState>& st) {
     st->clearLocs();
     st->error.clear();
     st->ok = true;
-    std::error_code ec;
-    st->mtime_ = std::filesystem::file_time_type::clock::now();
+    st->mtime_ = nowEpochSec();
     return true;
   } catch (const std::exception& e) {
     st->error = e.what();
@@ -243,7 +254,7 @@ int ShaderManager::pollHotReload(const std::vector<std::string>& changedFiles) {
         // retried, even one that preserves an older file timestamp (cp -p,
         // git checkout, archive extraction). The 1s throttle above prevents
         // per-frame attempts while it stays broken.
-        st->mtime_ = std::filesystem::file_time_type::min();
+        st->mtime_ = 0.0;  // permanently dirty: any restore is retried
         Log::warn("SHADER", "hot-reload failed for '" + st->vertKey + " + " + st->fragKey +
                                 "' - keeping previous version:\n" + st->error);
       }
@@ -254,7 +265,7 @@ int ShaderManager::pollHotReload(const std::vector<std::string>& changedFiles) {
 
 int ShaderManager::reloadAll() {
   for (auto& kv : programs_) {
-    kv.second->mtime_ = std::filesystem::file_time_type::clock::time_point::min();
+    kv.second->mtime_ = 0.0;
   }
   int n = 0;
   for (auto& kv : programs_) {

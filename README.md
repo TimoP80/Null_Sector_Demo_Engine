@@ -126,6 +126,31 @@ last good program), and the editor's `+ Scene`, `+ Asset`, track loader and
 drag-and-drop flows write data files and apply them immediately. Shader compile
 errors are shown inside the editor with file/line diagnostics.
 
+## Virtual filesystem & packaging
+
+All runtime asset reads go through a virtual filesystem, so the same `.nsd`
+production runs from the development tree or from a single packaged `.nsp`
+file. The VFS is selected once at startup — the renderer, shaders and asset
+loaders never know where the bytes came from.
+
+```bash
+# Development (unchanged)
+./build/Release/ns_demo.exe
+./build/Release/ns_demo.exe --demo=data/demo.nsd
+./build/Release/ns_demo.exe --editor
+
+# Create a package (headless; walks the .nsd's referenced assets)
+./build/Release/ns_demo.exe --pack data/demo.nsd --output GhostInTheMachine.nsp
+
+# Playback: mount the package — no data/ directory needed
+./build/Release/ns_demo.exe --play GhostInTheMachine.nsp
+```
+
+The `.nsp` format is a simple versioned container (magic `NSPK`, file table,
+FNV-1a integrity hashes) defined in `src/framework/vfs/`. The packer reports
+what it discovered and skips native plugins (documented limitation). See
+**packaging.html** in the docs for the full format and conventions.
+
 ## Documentation
 
 The `docs/` folder is a browsable HTML site (`docs/index.html`):
@@ -134,6 +159,7 @@ The `docs/` folder is a browsable HTML site (`docs/index.html`):
 - **cheatsheet.html** — one-page command / time / rig / interpolator reference
 - **build.html** — build, flags, validation battery
 - **first-effect.html** — writing an effect, registering it, scripting it
+- **packaging.html** — the virtual filesystem and `.nsp` package format
 - **troubleshooting.html** — common failures and how to diagnose them
 
 ## License

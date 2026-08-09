@@ -62,6 +62,7 @@
 #include "app/effectreg.hpp"
 #include "app/hotreloadcheck.hpp"
 #include "app/modelcheck.hpp"
+#include "app/packer.hpp"
 #include "app/prodcheck.hpp"
 #include "app/shadermanager.hpp"
 #include "app/shadertoycheck.hpp"
@@ -76,6 +77,10 @@
 #include "engine/shadercheck.hpp"
 #include "engine/timeline.hpp"
 #include "engine/ubo.hpp"
+#include "framework/vfs/directoryfs.hpp"
+#include "framework/vfs/nspack.hpp"
+#include "framework/vfs/packagefs.hpp"
+#include "framework/vfs/vfs.hpp"
 
 #include <array>
 #include <chrono>
@@ -97,31 +102,58 @@ static double wallNow() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-/** find a playable track: common names in cwd/exe dir. (An explicit --track
- *  is handled by splitTrackList - the first entry plays at boot.) */
-static std::string findTrack() {
+/** find a playable track through the runtime VFS: well-known names first,
+ *  then a soundtrack next to the production script - in its own directory
+ *  AND in the folder named after the script (data/foo.nsd + data/foo/track),
+ *  top-level files only so sibling productions' tracks never leak in.
+ *  An explicit --track is handled by splitTrackList - the first entry plays
+ *  at boot. Returns a VIRTUAL path (works for dev tree and .nsp packages). */
+static std::string findTrack(const std::string& prodScript) {
   const char* cands[] = {"ghostinthemachine.mp3", "audio.mp3", "assets/audio.mp3",
                          "ghostinthemachine.wav", "audio.wav", "assets/audio.wav"};
   for (const char* c : cands) {
-    if (std::filesystem::exists(c)) return c;
+    if (runtimeFS().exists(c)) return c;
   }
-  return "";
+  const size_t slash = prodScript.rfind("/");
+  const std::string dir = slash == std::string::npos
+                              ? std::string()
+                              : prodScript.substr(0, slash);
+  const std::string base = slash == std::string::npos
+                               ? prodScript
+                               : prodScript.substr(slash + 1);
+  const size_t dot = base.rfind(".");
+  const std::string stem = dot == std::string::npos ? base : base.substr(0, dot);
+  const std::string prodDir = dir.empty() ? stem : dir + "/" + stem;
+  int best = 99;
+  std::string found;
+  auto scanDir = [&](const std::string& d) {
+    for (const auto& e : runtimeFS().list(d)) {
+      const VFileInfo fi = runtimeFS().stat(e);
+      if (!fi.exists || fi.isDir) continue;
+      const std::string ext = e.size() >= 4 ? e.substr(e.size() - 4) : "";
+      int score = 99;
+      if (ext == ".mp3") score = 0;
+      else if (ext == ".ogg") score = 1;
+      else if (ext == ".wav") score = 2;
+      else if (ext == ".flac") score = 3;
+      if (score < best) { best = score; found = e; }
+    }
+  };
+  scanDir(dir);
+  if (prodDir != dir) scanDir(prodDir);
+  return found;
 }
 
-/** every playable track on disk under the standard folders (cwd, assets/,
- *  data/) - the runtime T / Shift+T cycling source. Mirrors the editor's
- *  candidate scan so the plain demo and the editor agree on what exists. */
+/** every playable track reachable through the runtime VFS (virtual paths) -
+ *  the runtime T / Shift+T cycling source. Mirrors the editor's candidate
+ *  scan so the plain demo and the editor agree on what exists. */
 static std::vector<std::string> scanTracks() {
   std::vector<std::string> out;
-  const char* dirs[] = {".", "assets", "data"};
-  for (const char* d : dirs) {
-    std::error_code ec;
-    for (const auto& e : std::filesystem::directory_iterator(d, ec)) {
-      if (ec) break;
-      if (e.is_directory()) continue;
-      const std::string ext = e.path().extension().string();
-      if (ext == ".wav" || ext == ".mp3") out.push_back(e.path().string());
-    }
+  std::vector<std::string> all;
+  walkVirtualFiles(runtimeFS(), "", all);
+  for (const auto& v : all) {
+    const std::string ext = v.size() >= 4 ? v.substr(v.size() - 4) : "";
+    if (ext == ".wav" || ext == ".mp3") out.push_back(v);
   }
   std::sort(out.begin(), out.end());
   return out;
@@ -177,6 +209,7 @@ static DirectorTime* g_director = nullptr;
 int main(int argc, char** argv) {
   std::string trackOverride, fontOverride, demoPath, pluginDir, perfJsonPath, perfCsvPath,
       perfRawPath, checkProductionPath, shotFile;
+  std::string packArg, outputArg, playArg, rootArg;  // --pack / --output / --play / --root
   bool noTrack = false, checkShaders = false, smokeAudio = false, checkModels = false,
        checkHotReload = false, checkShadertoy = false;
   float shotSeconds = -1;  // --shot=SECONDS:FILE.bmp: seek there, save one frame, exit
@@ -202,6 +235,13 @@ int main(int argc, char** argv) {
     else if (a.rfind("--track=", 0) == 0) trackOverride = a.substr(8);
     else if (a.rfind("--font=", 0) == 0) fontOverride = a.substr(7);
     else if (a.rfind("--demo=", 0) == 0) demoPath = a.substr(7);
+    else if (a.rfind("--pack=", 0) == 0) packArg = a.substr(7);
+    else if (a == "--pack" && i + 1 < argc) packArg = argv[++i];
+    else if (a.rfind("--output=", 0) == 0) outputArg = a.substr(9);
+    else if (a == "--output" && i + 1 < argc) outputArg = argv[++i];
+    else if (a.rfind("--play=", 0) == 0) playArg = a.substr(7);
+    else if (a == "--play" && i + 1 < argc) playArg = argv[++i];
+    else if (a.rfind("--root=", 0) == 0) rootArg = a.substr(7);
     else if (a.rfind("--plugin=", 0) == 0) pluginDir = a.substr(9);
     else if (a.rfind("--window=", 0) == 0) {
       int w = 0, h = 0;
@@ -269,6 +309,47 @@ int main(int argc, char** argv) {
   if (editorMode) {
     fullscreen = false;
     if (winW == 1600 && winH == 900) { winW = 1680; winH = 960; }
+  }
+
+  // --- packaging mode (GL-free) -----------------------------------------------
+  // ns_demo --pack data/demo.nsd --output GhostInTheMachine.nsp
+  if (!packArg.empty()) {
+    const std::string root =
+        rootArg.empty() ? std::filesystem::current_path().string() : rootArg;
+    const std::string out = outputArg;
+    return runProductionPacker(root, packArg, trackOverride, out);
+  }
+
+  // --- runtime VFS selection (Phase 7): one install near startup ------------
+  // --play mounts the .nsp package; everything else mounts the dev tree. All
+  // runtime asset loads go through this VFS - no scattered packageMode checks.
+  if (!playArg.empty()) {
+    auto pfs = std::make_unique<PackageFileSystem>();
+    std::string err;
+    if (!pfs->open(playArg, &err)) {
+      std::fprintf(stderr, "[MAIN] cannot open package: %s\n", err.c_str());
+      return 1;
+    }
+    if (demoPath.empty()) demoPath = pfs->productionScriptPath();
+    if (demoPath.empty()) {
+      std::fprintf(stderr,
+                   "[MAIN] package '%s' has no production marker - "
+                   "use --demo=data/production.nsd to pick one\n",
+                   playArg.c_str());
+      return 1;
+    }
+    setRuntimeFS(std::move(pfs));
+    std::fprintf(stderr, "[MAIN] playing packaged production: %s (script %s)\n",
+                 playArg.c_str(), demoPath.c_str());
+  } else {
+    auto dfs = std::make_unique<DirectoryFileSystem>();
+    dfs->mount("data", AppAssets::dataDir());
+    dfs->mount("shaders", AppAssets::shaderDir());
+    dfs->mount("assets", assetDir());
+    std::error_code ec;
+    const std::string cwd = std::filesystem::current_path(ec).string();
+    if (!ec) dfs->mount("", cwd);
+    setRuntimeFS(std::move(dfs));
   }
 
   // dev preflight: validate the production HEADLESSLY - no GL, no window. The
@@ -358,15 +439,16 @@ int main(int argc, char** argv) {
   {
     std::string fontPath = fontOverride;
     if (fontPath.empty()) {
-      const std::string pref = assetDir() + "/fonts/intro.ttf";
-      if (std::filesystem::exists(pref)) {
-        fontPath = pref;
+      // virtual paths through the runtime VFS (dev tree or package)
+      if (runtimeFS().exists("assets/fonts/intro.ttf")) {
+        fontPath = "assets/fonts/intro.ttf";
       } else {
-        std::error_code ec;
-        for (const auto& e : std::filesystem::directory_iterator(assetDir() + "/fonts", ec)) {
-          if (ec) break;
-          const std::string ext = e.path().extension().string();
-          if (ext == ".ttf" || ext == ".otf") { fontPath = e.path().string(); break; }
+        std::vector<std::string> fonts;
+        walkVirtualFiles(runtimeFS(), "assets/fonts", fonts);
+        std::sort(fonts.begin(), fonts.end());
+        for (const auto& f : fonts) {
+          const std::string ext = f.size() >= 4 ? f.substr(f.size() - 4) : "";
+          if (ext == ".ttf" || ext == ".otf") { fontPath = f; break; }
         }
       }
     }
@@ -391,7 +473,11 @@ int main(int argc, char** argv) {
   // first entry plays at boot and T / Shift+T rotates the whole list
   const std::vector<std::string> cliTracks = splitTrackList(trackOverride);
   if (!noTrack) {
-    const std::string track = cliTracks.empty() ? findTrack() : cliTracks[0];
+    // the boot track comes from the production's own folder (so a
+    // multi-production dev tree never leaks one show's music into another)
+    const std::string prodScript =
+        demoPath.empty() ? "data/demo.nsd" : demoPath;
+    const std::string track = cliTracks.empty() ? findTrack(prodScript) : cliTracks[0];
     if (!track.empty()) {
       audio.loadTrack(track);
     } else {
@@ -431,7 +517,7 @@ int main(int argc, char** argv) {
   in.showClock = &director.show;
   in.directorPaused = &director.paused;
   in.setDirectorScale = [](float s) { g_director->setScale(s); };
-  in.scriptPath = demoPath.empty() ? AppAssets::dataDir() + "/demo.nsd" : demoPath;
+  in.scriptPath = demoPath.empty() ? "data/demo.nsd" : demoPath;
   in.pluginDir = pluginDir.empty() ? AppAssets::dataDir() + "/plugins" : pluginDir;
 
   // --check-hotreload: the temp shader must exist BEFORE init so the
@@ -589,7 +675,7 @@ int main(int argc, char** argv) {
         // a typo'd A/B list surfaces at boot, not on the first T press
         int missing = 0;
         for (const auto& t : cliTracks)
-          if (!std::filesystem::exists(t)) missing++;
+          if (!runtimeFS().exists(t)) missing++;
         if (missing > 0)
           std::fprintf(stderr,
                        "[AUDIO] note: %d of %d --track file(s) missing "

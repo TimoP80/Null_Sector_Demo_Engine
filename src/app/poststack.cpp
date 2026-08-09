@@ -1,9 +1,13 @@
 #include "app/poststack.hpp"
 #include "engine/camera.hpp"
+#include "framework/vfs/vfs.hpp"
 #include "framework/core/json.hpp"
 #include "framework/core/log.hpp"
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 
 namespace ns {
 
@@ -287,7 +291,22 @@ bool PostStack::loadPreset(const Value& preset, ShaderManager& sm) {
 
 bool PostStack::loadPresetFile(const std::string& path, ShaderManager& sm) {
   try {
-    return loadPreset(Json::parseFile(path), sm);
+    // virtual path (data/post/...): read through the runtime VFS, fall back
+    // to a direct file read for absolute editor paths
+    std::string text = runtimeFS().readText(path);
+    if (text.empty()) {
+      std::error_code ec;
+      if (std::filesystem::is_regular_file(path, ec) && !ec) {
+        std::ifstream f(path, std::ios::binary);
+        if (f) {
+          std::ostringstream ss;
+          ss << f.rdbuf();
+          text = ss.str();
+        }
+      }
+    }
+    if (text.empty()) throw JsonError("cannot open preset: " + path);
+    return loadPreset(Json::parseText(text), sm);
   } catch (const std::exception& e) {
     Log::error("POST", "preset load failed: " + std::string(e.what()));
     return false;

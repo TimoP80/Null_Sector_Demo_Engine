@@ -1,4 +1,5 @@
 #include "engine/audio.hpp"
+#include "framework/vfs/vfs.hpp"
 #include "engine/schedule.hpp"
 
 #define MINIAUDIO_IMPLEMENTATION
@@ -17,6 +18,9 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <iterator>
+#include <fstream>
+#include <filesystem>
 #include <new>
 #include <thread>
 #include <vector>
@@ -280,7 +284,23 @@ AudioEngine::Decoded AudioEngine::decodeFile(const std::string& path,
   std::lock_guard<std::mutex> dk(gDecodeMtx);
   ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 2, sampleRate_);
   ma_decoder dec;
-  if (ma_decoder_init_file(path.c_str(), &cfg, &dec) != MA_SUCCESS) {
+  // Load the track bytes through the runtime VFS (dev tree or package), so
+  // --track works with both a filesystem path and a virtual path. The bytes
+  // must outlive the decoder; decodeFile fully drains it before returning.
+  std::vector<uint8_t> bytes = runtimeFS().read(path);
+  if (bytes.empty()) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec) && !ec) {
+      std::ifstream f(path, std::ios::binary);
+      if (f) bytes.assign(std::istreambuf_iterator<char>(f),
+                          std::istreambuf_iterator<char>());
+    }
+  }
+  const ma_result openRes = bytes.empty()
+                                ? MA_DOES_NOT_EXIST
+                                : ma_decoder_init_memory(bytes.data(), bytes.size(),
+                                                         &cfg, &dec);
+  if (openRes != MA_SUCCESS) {
     std::fprintf(stderr,
                  "[AUDIO] track load failed: cannot decode '%s' (WAV/MP3);"
                  " keeping the previous source (silent if none).\n",

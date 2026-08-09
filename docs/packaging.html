@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Virtual Filesystem & Packaging — Engine Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">GHOST IN THE MACHINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">▣</span> Runtime · Virtual Filesystem &amp; Packaging</p>
+        <h1>Virtual Filesystem &amp; .nsp Packages</h1>
+        <p class="lede">The engine never cares where an asset comes from. Every runtime read goes through a virtual filesystem (VFS), so the exact same <code>.nsd</code> production runs from the development tree, a packaged <code>.nsp</code> file, or — later — an executable with an embedded package.</p>
+      </header>
+
+      <section>
+        <h2>Why a VFS?</h2>
+        <p class="sec-sub">Engine subsystems used to open files directly (<code>std::ifstream("data/shaders/foo.frag")</code>). That bakes in "the file lives on disk next to the engine" — which breaks as soon as a production is distributed as a single file. The VFS answers one question: <em>where are these bytes?</em> The asset layer answers the other: <em>what are these bytes?</em></p>
+        <div class="code" data-lang="text">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">architecture</span><span class="lang">text</span></div>
+          <pre>                    VirtualFileSystem  (read / exists / list / stat)
+                           │
+             ┌─────────────┼─────────────┐
+             │             │             │
+             ▼             ▼             ▼
+       DirectoryFS     PackageFS     EmbeddedFS (future)
+       data/ tree      .nsp file     inside the exe
+                           │
+                           ▼
+              AssetManager / loaders (shaders, textures,
+              models, fonts, audio, .nsd scripts)</pre>
+        </div>
+      </section>
+
+      <section id="virtual-paths">
+        <h2>Virtual path conventions</h2>
+        <p class="sec-sub">All runtime asset paths are production-relative virtual paths with <code>/</code> separators — never machine-specific absolute paths:</p>
+        <div class="code" data-lang="text">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">examples</span><span class="lang">text</span></div>
+          <pre>shaders/tunnel.frag
+data/scenes/intro.nsd
+data/textures/noise.png
+data/models/city.obj
+data/materials/neon.json
+data/post/nd_boot.json
+data/shadertoy/tunnel_warp.glsl
+assets/fonts/intro.ttf
+data/neural_dust/track.mp3</pre>
+        </div>
+        <ul>
+          <li>On the development tree these map to <code>shaders/</code>, <code>data/</code> and <code>assets/</code> under the repo root.</li>
+          <li>In a package they resolve inside the <code>.nsp</code> — the packer writes the same virtual paths, so a production runs identically from either source.</li>
+          <li>Case and separator behavior follows the host OS: virtual paths are normalized to <code>/</code>; Windows hosts keep their usual case-insensitivity, other hosts are case-sensitive.</li>
+        </ul>
+      </section>
+
+      <section id="usage">
+        <h2>Usage</h2>
+        <p class="sec-sub">Development and packaged playback are the same binary — only the VFS mount differs, and it is selected once at startup:</p>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">terminal</span><span class="lang">bash</span></div>
+          <pre># Development: run the dev tree directly (unchanged)
+./build/Release/ns_demo.exe
+./build/Release/ns_demo.exe --demo=data/demo.nsd
+./build/Release/ns_demo.exe --editor
+
+# Create a package from a production (discover all referenced assets)
+./build/Release/ns_demo.exe --pack data/demo.nsd --output GhostInTheMachine.nsp
+
+# Playback: mount the package as the VFS (no data/ directory needed)
+./build/Release/ns_demo.exe --play GhostInTheMachine.nsp</pre>
+        </div>
+        <p>Packaging runs headless — no window, no GL — so it works on CI. The production argument is resolved the same way the app resolves <code>--demo</code>, and an explicit <code>--track=FILE</code> is honored. <code>--root=PATH</code> points the packer at a repo root other than the current directory.</p>
+      </section>
+
+      <section id="nsp-format">
+        <h2>The .nsp package format</h2>
+        <p class="sec-sub">A deliberately simple custom format — no third-party dependencies, versioned for the future:</p>
+        <div class="code" data-lang="text">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">layout</span><span class="lang">text</span></div>
+          <pre>Header    magic "NSPK" + format version + counts + data offset
+Manifest  one entry per file: virtual path, offset, uncompressed size,
+          compression method, FNV-1a hash
+File data the bytes, back to back (uncompressed today; the method field
+          leaves room for compression without breaking old packages)</pre>
+        </div>
+        <p class="sec-sub">The reader validates aggressively and fails safely:</p>
+        <ul>
+          <li>bad magic / unsupported version → rejected up front</li>
+          <li>manifest smaller than the file table or past the end of the file → <em>truncated package</em></li>
+          <li>entry offsets/sizes outside the file → rejected, never read</li>
+          <li>FNV-1a hash mismatch on read → <em>corrupted data</em> (FNV-1a is a lightweight integrity check, not a cryptographic hash — no security claims)</li>
+        </ul>
+        <p>A hidden <code>.ns-production</code> entry records which production the package runs; <code>--play</code> uses it to pick the script automatically.</p>
+      </section>
+
+      <section id="packer">
+        <h2>What the packer includes</h2>
+        <p class="sec-sub">The packer does <em>not</em> copy the whole <code>data/</code> directory. It starts from the production script, parses it with the existing script engine, and collects every referenced asset:</p>
+        <ul>
+          <li>shaders (every file under <code>shaders/</code> — effects select shaders by name from code, so the whole set ships)</li>
+          <li>textures, models, materials (plus the albedo/normal maps materials reference)</li>
+          <li>post-processing presets, Shadertoy files, fonts (every TTF/OTF under <code>assets/fonts/</code>)</li>
+          <li>other <code>.nsd</code> scripts / scenes / timelines reachable from the production</li>
+          <li>audio: an explicit <code>--track=FILE</code>, else a soundtrack next to the script (its directory or the folder named after it, <code>data/foo.nsd</code> + <code>data/foo/track.mp3</code>) — sibling productions' tracks never leak in</li>
+        </ul>
+        <p>Plugins are native libraries and cannot be loaded from inside a package — the packer warns and skips them (a documented limitation). The report lists every kind it found and the package size:</p>
+        <div class="code" data-lang="text">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">stderr</span><span class="lang">text</span></div>
+          <pre>Null Sector Production Packer
+------------------------------
+Production: GHOST IN THE MACHINE
+Source:     data/demo.nsd
+
+Assets:
+  shader     81
+  shadertoy  2
+  texture    1
+  model      2
+  material   2
+  post       3
+  font       1
+  script     1
+
+Files:       93
+Raw size:    3.8 MB
+Package:     3.8 MB
+
+Created:
+  GhostInTheMachine.nsp</pre>
+        </div>
+      </section>
+
+      <section id="internals">
+        <h2>Where it lives in the code</h2>
+        <p class="sec-sub">The VFS is GL-free framework code — the renderer and shaders know nothing about packages:</p>
+        <div class="code" data-lang="text">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">layout</span><span class="lang">text</span></div>
+          <pre>src/framework/vfs/
+  vfs.hpp/.cpp          VirtualFileSystem interface, VFileInfo, path
+                        normalization (rejects ../, absolute, drive letters),
+                        runtimeFS() global the loaders use
+  directoryfs.hpp/.cpp  DirectoryFileSystem: mounts virtual prefixes onto
+                        real dirs ("data" -> repo/data, "" catch-all)
+  nspack.hpp/.cpp       .nsp writer + reader (header, manifest, FNV-1a,
+                        validation), PackageWriter for the packer
+  packagefs.hpp/.cpp    PackageFileSystem: the reader behind the VFS API
+
+src/app/packer.cpp      runProductionPacker: parses the .nsd, walks
+                        references, writes the package, prints the report
+src/main.cpp            --pack / --play / --root / --output parsing and the
+                        one-time VFS selection near startup</pre>
+        </div>
+        <p>Development/editor operations that must touch real files — saving, creating, watching, modifying production data — keep direct filesystem access; the VFS is the runtime <em>read</em> path. Hot reload and the editor are unchanged and remain dev-tree based.</p>
+      </section>
+
+      <section id="tests">
+        <h2>Tests</h2>
+        <p class="sec-sub">The framework test suite (<code>ns_fw_tests.exe</code>) covers:</p>
+        <ul>
+          <li><strong>DirectoryFileSystem</strong> — existing/missing files, text &amp; binary reads, path normalization, traversal rejection</li>
+          <li><strong>Package format</strong> — create/read round trip, multiple files, empty file, binary file, large file, invalid header, invalid version, invalid offsets, truncated package, checksum failure</li>
+          <li><strong>Equivalence</strong> — the same virtual paths resolve from the dev tree and from a package, with byte-identical contents</li>
+        </ul>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

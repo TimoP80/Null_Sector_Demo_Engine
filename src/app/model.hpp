@@ -65,7 +65,11 @@ struct Model {
 /** minimal OBJ importer (v / vt / vn / f with v, v/vt, v//vn, v/vt/vn) */
 class ObjImporter {
 public:
+  /** load an OBJ file (virtual path through the runtime VFS, with a direct
+   *  file fallback for absolute editor paths). */
   static bool load(const std::string& path, Model& out);
+  /** parse OBJ text (the runtime VFS read is the caller's job). */
+  static bool loadText(const std::string& text, Model& out, const std::string& label = "");
 };
 
 struct LightUniforms {

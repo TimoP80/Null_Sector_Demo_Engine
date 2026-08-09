@@ -1,4 +1,5 @@
 #include "app/model.hpp"
+#include "framework/vfs/vfs.hpp"
 #include "engine/math.hpp"
 #include "framework/core/log.hpp"
 
@@ -126,17 +127,35 @@ struct ObjFace {
 }  // namespace
 
 bool ObjImporter::load(const std::string& path, Model& out) {
-  std::ifstream f(path);
-  if (!f) {
+  std::string text = runtimeFS().readText(path);
+  if (text.empty()) {
+    // absolute editor path: direct read
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec) && !ec) {
+      std::ifstream f(path);
+      if (f) {
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        text = ss.str();
+      }
+    }
+  }
+  if (text.empty()) {
     Log::error("MODEL", "cannot open OBJ: " + path);
     return false;
   }
+  return loadText(text, out, path);
+}
+
+bool ObjImporter::loadText(const std::string& text, Model& out,
+                             const std::string& label) {
+  std::istringstream in(text);
   std::vector<std::array<float, 3>> v, vn;
   std::vector<std::array<float, 2>> vt;
   std::vector<ObjFace> faces;
 
   std::string line;
-  while (std::getline(f, line)) {
+  while (std::getline(in, line)) {
     std::istringstream is(line);
     std::string tag;
     is >> tag;
@@ -187,7 +206,7 @@ bool ObjImporter::load(const std::string& path, Model& out) {
     }
   }
   if (faces.empty() || v.empty()) {
-    Log::error("MODEL", "OBJ has no faces: " + path);
+    Log::error("MODEL", "OBJ has no faces: " + label);
     return false;
   }
 
@@ -302,9 +321,9 @@ bool ObjImporter::load(const std::string& path, Model& out) {
   }
 
   m.upload();
-  out.name = std::filesystem::path(path).stem().string();
+  out.name = std::filesystem::path(label).stem().string();
   out.meshes.push_back(std::move(m));
-  Log::info("MODEL", "loaded '" + path + "' (" + std::to_string(vcount) + " verts, " +
+  Log::info("MODEL", "loaded '" + label + "' (" + std::to_string(vcount) + " verts, " +
                          std::to_string(faces.size()) + " faces)");
   return true;
 }

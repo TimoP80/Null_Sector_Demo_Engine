@@ -14,6 +14,10 @@
 #include "framework/script/scriptengine.hpp"
 #include "framework/script/scriptparser.hpp"
 #include "framework/timeline/timelineeditor.hpp"
+#include "framework/vfs/directoryfs.hpp"
+#include "framework/vfs/nspack.hpp"
+#include "framework/vfs/packagefs.hpp"
+#include "framework/vfs/vfs.hpp"
 #include "app/shadertoyparse.hpp"
 #include "engine/gputimer.hpp"
 
@@ -1402,6 +1406,383 @@ static void testDemoData() {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// testVirtualPath - Phase 8 path rules: '/'-normalization, traversal rejection,
+// join/parent/fileName helpers.
+// ---------------------------------------------------------------------------
+static void testVirtualPath() {
+  CHECK(normalizeVirtualPath("data/demo.nsd") == "data/demo.nsd", "vpath: plain");
+  CHECK(normalizeVirtualPath("data\\demo.nsd") == "data/demo.nsd", "vpath: backslash normalized");
+  CHECK(normalizeVirtualPath("./data//demo.nsd") == "data/demo.nsd", "vpath: ./ and // collapsed");
+  CHECK(normalizeVirtualPath("data/./demo.nsd") == "data/demo.nsd", "vpath: . segment dropped");
+  CHECK(normalizeVirtualPath("../foo") == "", "vpath: leading .. rejected");
+  CHECK(normalizeVirtualPath("../../secret") == "", "vpath: deep traversal rejected");
+  CHECK(normalizeVirtualPath("a/../b") == "", "vpath: mid traversal rejected");
+  CHECK(normalizeVirtualPath("/abs") == "", "vpath: absolute rejected");
+  CHECK(normalizeVirtualPath("C:/data") == "", "vpath: drive letter rejected");
+  CHECK(normalizeVirtualPath("a:b") == "", "vpath: colon rejected");
+  CHECK(normalizeVirtualPath("") == "", "vpath: empty rejected");
+  CHECK(normalizeVirtualPath("data/") == "data", "vpath: trailing slash trimmed");
+
+  CHECK(isSafeVirtualPath("data/demo.nsd"), "safe: plain");
+  CHECK(!isSafeVirtualPath("../x"), "safe: traversal unsafe");
+  CHECK(!isSafeVirtualPath("data\\x"), "safe: backslash not canonical");
+
+  CHECK(joinVirtualPath("data", "demo.nsd") == "data/demo.nsd", "join: simple");
+  CHECK(joinVirtualPath("data/", "demo.nsd") == "data/demo.nsd", "join: trailing slash");
+  CHECK(joinVirtualPath("data", "../x") == "", "join: traversal rejected");
+  CHECK(parentVirtualPath("data/a/b.frag") == "data/a", "parent: nested");
+  CHECK(parentVirtualPath("demo.nsd") == "", "parent: bare file");
+  CHECK(fileNameVirtualPath("data/a/b.frag") == "b.frag", "fileName: nested");
+  CHECK(fileNameVirtualPath("demo.nsd") == "demo.nsd", "fileName: bare");
+}
+
+// ---------------------------------------------------------------------------
+// testDirectoryFS - DirectoryFileSystem over a scratch tree.
+// ---------------------------------------------------------------------------
+static void testDirectoryFS() {
+  const std::string dir = "fw_vfs_tmp";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::filesystem::create_directories(dir + "/sub", ec);
+  {
+    std::ofstream f(dir + "/hello.txt");
+    f << "hello world";
+  }
+  {
+    std::ofstream f(dir + "/sub/deep.txt");
+    f << "deep content";
+  }
+  const std::vector<uint8_t> bin = {0x00, 0x01, 0xFE, 0xFF, 0x42};
+  {
+    std::ofstream f(dir + "/blob.bin", std::ios::binary);
+    f.write((const char*)bin.data(), (std::streamsize)bin.size());
+  }
+
+  DirectoryFileSystem fs;
+  fs.mount("data", dir);       // data/hello.txt -> <dir>/hello.txt
+  fs.mount("", dir);           // catch-all root
+
+  // exists
+  CHECK(fs.exists("data/hello.txt"), "dfs: exists mounted");
+  CHECK(fs.exists("hello.txt"), "dfs: exists catch-all");
+  CHECK(!fs.exists("data/nope.txt"), "dfs: missing file");
+  CHECK(!fs.exists("data/sub"), "dfs: dir is not a file");
+
+  // reads
+  CHECK(fs.readText("data/hello.txt") == "hello world", "dfs: text read");
+  CHECK(fs.read("data/blob.bin") == bin, "dfs: binary read");
+  CHECK(fs.readText("data/nope.txt").empty(), "dfs: missing text empty");
+  CHECK(fs.read("data/nope.txt").empty(), "dfs: missing binary empty");
+
+  // normalization
+  CHECK(fs.readText("data//hello.txt") == "hello world", "dfs: double slash");
+  CHECK(fs.readText("data\\hello.txt") == "hello world", "dfs: backslash read");
+
+  // traversal rejection
+  CHECK(!fs.exists("../hello.txt"), "dfs: traversal exists rejected");
+  CHECK(fs.read("../hello.txt").empty(), "dfs: traversal read rejected");
+  CHECK(!fs.exists("C:/windows/win.ini"), "dfs: absolute rejected");
+  CHECK(fs.readText("..\\hello.txt").empty(), "dfs: backslash traversal rejected");
+
+  // stat
+  const VFileInfo st = fs.stat("data/blob.bin");
+  CHECK(st.exists && !st.isDir && st.size == bin.size(), "dfs: stat file");
+  const VFileInfo sd = fs.stat("data");
+  CHECK(sd.exists && sd.isDir, "dfs: stat dir");
+  CHECK(!fs.stat("data/nope.txt").exists, "dfs: stat missing");
+
+  // list (full virtual paths)
+  const std::vector<std::string> kids = fs.list("data");
+  CHECK(kids.size() == 3, "dfs: list size");
+  CHECK(std::find(kids.begin(), kids.end(), "data/blob.bin") != kids.end(), "dfs: list file");
+  CHECK(std::find(kids.begin(), kids.end(), "data/sub") != kids.end(), "dfs: list dir");
+  const std::vector<std::string> sub = fs.list("data/sub");
+  CHECK(sub.size() == 1 && sub[0] == "data/sub/deep.txt", "dfs: list nested");
+
+  // resolve() gives a real path for dev tooling
+  const std::string real = fs.resolve("data/hello.txt");
+  CHECK(real == dir + "/hello.txt", "dfs: resolve");
+  CHECK(fs.resolve("../x").empty(), "dfs: resolve traversal empty");
+
+  std::filesystem::remove_all(dir, ec);
+}
+
+
+// ---------------------------------------------------------------------------
+// testPackageFormat - write/read round trip + defensive validation.
+// ---------------------------------------------------------------------------
+static void testPackageFormat() {
+  const std::string dir = "fw_vfs_tmp";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::filesystem::create_directories(dir, ec);
+  const std::string pkg = dir + "/test.nsp";
+
+  // --- build a package: text, binary, empty, large
+  std::vector<uint8_t> big(512 * 1024);
+  for (size_t i = 0; i < big.size(); i++) big[i] = (uint8_t)(i * 31 + 7);
+  const std::vector<uint8_t> bin = {0x00, 0x01, 0xFE, 0xFF};
+  {
+    PackageWriter w;
+    std::string err;
+    CHECK(w.begin(pkg, &err), "pkg: begin");
+    CHECK(w.addFile("data/demo.nsd", "demo \"TEST\" { bpm 120 }", &err), "pkg: add text");
+    CHECK(w.addFile("shaders/a.frag", std::string("#version 330\n"), &err), "pkg: add shader");
+    CHECK(w.addFile("assets/blob.bin", bin, &err), "pkg: add binary");
+    CHECK(w.addFile("assets/empty.bin", std::vector<uint8_t>(), &err), "pkg: add empty");
+    CHECK(w.addFile("assets/big.bin", big, &err), "pkg: add large");
+    CHECK(!w.addFile("../escape.txt", "nope", &err), "pkg: traversal rejected at add");
+    CHECK(w.setProduction("data/demo.nsd", &err), "pkg: set production");
+    CHECK(!w.setProduction("data/missing.nsd", &err), "pkg: production must exist");
+    CHECK(w.fileCount() == 5, "pkg: file count");
+    CHECK(w.finish(&err), "pkg: finish");
+  }
+
+  // --- read it back
+  {
+    PackageReader r;
+    std::string err;
+    CHECK(r.open(pkg, &err), "pkg: open");
+    CHECK(r.fileCount() == 6, "pkg: reader count (incl. marker)");
+    CHECK(r.has("data/demo.nsd"), "pkg: has text");
+    CHECK(!r.has("data/nope.nsd"), "pkg: missing absent");
+    CHECK(r.readText("data/demo.nsd") == "demo \"TEST\" { bpm 120 }", "pkg: text content");
+    CHECK(r.read("assets/blob.bin") == bin, "pkg: binary content");
+    CHECK(r.read("assets/empty.bin").empty(), "pkg: empty content");
+    CHECK(r.read("assets/big.bin") == big, "pkg: large content");
+    CHECK(r.fileSize("assets/big.bin") == big.size(), "pkg: fileSize");
+    CHECK(r.readText(".ns-production") == "data/demo.nsd", "pkg: production marker");
+    CHECK(r.verifyAll(&err), "pkg: verifyAll clean");
+    const std::vector<std::string> names = r.fileList();
+    CHECK(names.size() == 6, "pkg: fileList size");
+    CHECK(r.read("../escape.txt").empty(), "pkg: traversal read empty");
+  }
+
+  // --- defensive validation: corrupt copies of a valid package
+  auto copyPkg = [&](const std::string& out) {
+    std::filesystem::copy_file(pkg, out, ec);
+    return out;
+  };
+
+  // bad magic
+  {
+    const std::string p = copyPkg(dir + "/bad_magic.nsp");
+    {
+      std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+      f.seekp(0);
+      f.write("XXXX", 4);
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(!r.open(p, &err), "pkg: bad magic rejected");
+    CHECK(err.find("magic") != std::string::npos, "pkg: bad magic message");
+  }
+
+  // unsupported version
+  {
+    const std::string p = copyPkg(dir + "/bad_ver.nsp");
+    {
+      std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+      f.seekp(4);
+      const uint32_t v = 999;
+      f.write((const char*)&v, 4);  // little-endian on this host (x86)
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(!r.open(p, &err), "pkg: bad version rejected");
+    CHECK(err.find("version") != std::string::npos, "pkg: bad version message");
+  }
+
+  // invalid offsets: manifestSize claims more than the file holds
+  {
+    const std::string p = copyPkg(dir + "/bad_off.nsp");
+    {
+      std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+      f.seekp(24);  // manifestSize u64
+      const uint64_t huge = 1ull << 40;
+      f.write((const char*)&huge, 8);
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(!r.open(p, &err), "pkg: invalid offset rejected");
+  }
+
+  // truncated package (cut in the middle of the data region)
+  {
+    const std::string p = dir + "/trunc.nsp";
+    {
+      std::ifstream in(pkg, std::ios::binary);
+      const std::string data((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+      std::ofstream out(p, std::ios::binary | std::ios::trunc);
+      out.write(data.data(), (std::streamsize)(data.size() / 2));
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(!r.open(p, &err), "pkg: truncated rejected");
+  }
+
+  // checksum failure: flip one byte in a payload
+  {
+    const std::string p = copyPkg(dir + "/corrupt.nsp");
+    {
+      // big.bin dominates the package, so the file's midpoint is inside it
+      const uint64_t half = (uint64_t)std::filesystem::file_size(p, ec) / 2;
+      std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+      f.seekp((std::streamoff)half, std::ios::beg);
+      f.write("X", 1);
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(r.open(p, &err), "pkg: corrupt opens structurally");
+    CHECK(!r.verifyAll(&err), "pkg: verifyAll catches corruption");
+    CHECK(err.find("checksum") != std::string::npos, "pkg: checksum message");
+    CHECK(r.read("assets/big.bin").empty(), "pkg: corrupt read rejected");
+    CHECK(r.lastError().find("checksum") != std::string::npos, "pkg: read checksum message");
+  }
+
+  // invalid dataOffset in the header (points past EOF)
+  {
+    const std::string p = copyPkg(dir + "/bad_entry.nsp");
+    {
+      std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+      f.seekp(32);  // dataOffset u64
+      const uint64_t oob = 1ull << 40;
+      f.write((const char*)&oob, 8);
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(!r.open(p, &err), "pkg: out-of-range data offset rejected");
+  }
+
+  std::filesystem::remove_all(dir, ec);
+}
+
+
+// ---------------------------------------------------------------------------
+// testPackageFS - the .nsp mounted as a VirtualFileSystem.
+// ---------------------------------------------------------------------------
+static void testPackageFS() {
+  const std::string dir = "fw_vfs_tmp";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::filesystem::create_directories(dir, ec);
+  const std::string pkg = dir + "/fs.nsp";
+  {
+    PackageWriter w;
+    std::string err;
+    CHECK(w.begin(pkg, &err), "pfs: begin");
+    CHECK(w.addFile("data/demo.nsd", "demo \"FS\" { bpm 120 }", &err), "pfs: add nsd");
+    CHECK(w.addFile("shaders/x.frag", "void main(){}", &err), "pfs: add frag");
+    CHECK(w.addFile("data/sub/deep.txt", "deep", &err), "pfs: add nested");
+    CHECK(w.setProduction("data/demo.nsd", &err), "pfs: marker");
+    CHECK(w.finish(&err), "pfs: finish");
+  }
+
+  PackageFileSystem fs;
+  std::string err;
+  CHECK(fs.open(pkg, &err), "pfs: open");
+  CHECK(fs.isPackage(), "pfs: isPackage");
+  CHECK(!runtimeFSIsPackage(), "pfs: default runtime FS is not a package");
+
+  CHECK(fs.exists("data/demo.nsd"), "pfs: exists");
+  CHECK(!fs.exists("data/nope.nsd"), "pfs: missing");
+  CHECK(fs.readText("data/demo.nsd") == "demo \"FS\" { bpm 120 }", "pfs: readText");
+  CHECK(fs.productionScriptPath() == "data/demo.nsd", "pfs: productionScriptPath");
+
+  const VFileInfo st = fs.stat("shaders/x.frag");
+  CHECK(st.exists && !st.isDir && st.size == 13, "pfs: stat file");
+  CHECK(st.mtime == 0.0, "pfs: packaged files are immutable");
+  const VFileInfo sd = fs.stat("data");
+  CHECK(sd.exists && sd.isDir, "pfs: stat dir");
+  CHECK(!fs.stat("data/nope.nsd").exists, "pfs: stat missing");
+
+  const std::vector<std::string> kids = fs.list("data");
+  CHECK(kids.size() == 2, "pfs: list data");
+  CHECK(std::find(kids.begin(), kids.end(), "data/demo.nsd") != kids.end(), "pfs: list file");
+  CHECK(std::find(kids.begin(), kids.end(), "data/sub") != kids.end(), "pfs: list dir");
+  const std::vector<std::string> sub = fs.list("data/sub");
+  CHECK(sub.size() == 1 && sub[0] == "data/sub/deep.txt", "pfs: list nested");
+
+  CHECK(!fs.exists("../x"), "pfs: traversal rejected");
+  CHECK(fs.read("../x").empty(), "pfs: traversal read empty");
+  CHECK(!fs.exists("C:/windows/win.ini"), "pfs: absolute rejected");
+
+  std::filesystem::remove_all(dir, ec);
+}
+
+// ---------------------------------------------------------------------------
+// testDevPackageEquivalence - a production loaded from the dev tree and the
+// same production from a package must resolve identical virtual paths with
+// identical contents.
+// ---------------------------------------------------------------------------
+static void testDevPackageEquivalence() {
+  const std::string dir = "fw_vfs_tmp";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::filesystem::create_directories(dir, ec);
+  const std::string pkg = dir + "/equiv.nsp";
+
+  // dev tree: mount the real data + shaders dirs the way main() does
+  const std::string dataDir = NULLSECTOR_DATA_DIR;
+  const std::string shaderDir = NULLSECTOR_SHADER_DIR;
+  CHECK(std::filesystem::is_directory(dataDir), "equiv: data dir exists");
+  CHECK(std::filesystem::is_directory(shaderDir), "equiv: shader dir exists");
+
+  // representative production references (avoid the 61MB soundtrack in tests)
+  const char* refs[] = {
+      "data/demo.nsd",
+      "shaders/compose.frag",
+      "shaders/bloom_extract.frag",
+      "data/materials/chrome.json",
+      "data/post/clean.json",
+  };
+  DirectoryFileSystem dev;
+  dev.mount("data", dataDir);
+  dev.mount("shaders", shaderDir);
+
+  // package the references
+  {
+    PackageWriter w;
+    std::string err;
+    CHECK(w.begin(pkg, &err), "equiv: begin");
+    for (const char* ref : refs) {
+      const std::vector<uint8_t> bytes = dev.read(ref);
+      CHECK(!bytes.empty(), ("equiv: dev has " + std::string(ref)).c_str());
+      CHECK(w.addFile(ref, bytes, &err), "equiv: add");
+    }
+    CHECK(w.setProduction("data/demo.nsd", &err), "equiv: marker");
+    CHECK(w.finish(&err), "equiv: finish");
+  }
+
+  // load the package as a VFS and compare path-by-path
+  PackageFileSystem pfs;
+  std::string err;
+  CHECK(pfs.open(pkg, &err), "equiv: open");
+  for (const char* ref : refs) {
+    CHECK(pfs.exists(ref), ("equiv: pkg has " + std::string(ref)).c_str());
+    CHECK(pfs.read(ref) == dev.read(ref),
+          ("equiv: contents match " + std::string(ref)).c_str());
+    CHECK(pfs.stat(ref).size == dev.stat(ref).size,
+          ("equiv: sizes match " + std::string(ref)).c_str());
+  }
+  // the demo.nsd production parses identically from both
+  {
+    ScriptEngine devEx, pkgEx;
+    CHECK(devEx.loadText(dev.readText("data/demo.nsd"), "data/demo.nsd"),
+          "equiv: dev script loads");
+    CHECK(pkgEx.loadText(pfs.readText("data/demo.nsd"), "data/demo.nsd"),
+          "equiv: pkg script loads");
+    CHECK(devEx.script().title == pkgEx.script().title, "equiv: same title");
+    CHECK((int)devEx.scenes().size() == (int)pkgEx.scenes().size(),
+          "equiv: same scene count");
+  }
+
+  std::filesystem::remove_all(dir, ec);
+}
+
 }  // namespace ns
 
 static void runAll() {
@@ -1420,6 +1801,11 @@ static void runAll() {
   ns::testValueStrings();
   ns::testGpuTimeStats();
   ns::testDemoData();
+  ns::testVirtualPath();
+  ns::testDirectoryFS();
+  ns::testPackageFormat();
+  ns::testPackageFS();
+  ns::testDevPackageEquivalence();
 }
 
 int main() {

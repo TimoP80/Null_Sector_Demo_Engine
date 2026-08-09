@@ -2,6 +2,7 @@
 #include "engine/font8x8.hpp"
 #include "engine/gl.hpp"
 #include "engine/paths.hpp"
+#include "framework/vfs/vfs.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -71,15 +72,19 @@ Assets buildFontAtlas() {
 Assets buildTrueTypeFontAtlas(const std::string& path) {
   Assets a;
 
-  // load the font file bytes
-  std::ifstream f(path, std::ios::binary);
-  if (!f) {
-    std::fprintf(stderr, "[ASSETS] cannot open font %s\n", path.c_str());
-    return a;
-  }
-  std::vector<unsigned char> ttf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  // load the font file bytes (virtual path through the runtime VFS, with a
+  // direct-file fallback for absolute --font= paths)
+  std::vector<unsigned char> ttf = runtimeFS().read(path);
   if (ttf.empty()) {
-    std::fprintf(stderr, "[ASSETS] font %s is empty\n", path.c_str());
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec) && !ec) {
+      std::ifstream f(path, std::ios::binary);
+      if (f) ttf.assign(std::istreambuf_iterator<char>(f),
+                        std::istreambuf_iterator<char>());
+    }
+  }
+  if (ttf.empty()) {
+    std::fprintf(stderr, "[ASSETS] cannot open font %s\n", path.c_str());
     return a;
   }
 
@@ -150,8 +155,22 @@ Assets buildTrueTypeFontAtlas(const std::string& path) {
 }
 
 static bool loadPngRGBA(const std::string& path, std::vector<unsigned char>& out, int& w, int& h) {
+  // virtual path through the runtime VFS (dev tree or package); absolute
+  // editor paths fall through to a direct file read
+  std::vector<unsigned char> bytes = runtimeFS().read(path);
+  if (bytes.empty()) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec) && !ec) {
+      std::ifstream f(path, std::ios::binary);
+      if (f) bytes.assign(std::istreambuf_iterator<char>(f),
+                          std::istreambuf_iterator<char>());
+    }
+  }
   int comp = 0;
-  unsigned char* data = stbi_load(path.c_str(), &w, &h, &comp, 4);
+  unsigned char* data = bytes.empty()
+                            ? nullptr
+                            : stbi_load_from_memory(bytes.data(), (int)bytes.size(),
+                                                    &w, &h, &comp, 4);
   if (!data) {
     std::fprintf(stderr, "[ASSETS] failed to load %s: %s\n", path.c_str(), stbi_failure_reason());
     return false;
@@ -165,7 +184,7 @@ bool loadLogoTexture(LogoAsset& out) {
 
   std::vector<unsigned char> px;
   int w = 0, h = 0;
-  if (!loadPngRGBA(assetDir() + "/logo.png", px, w, h)) return false;
+  if (!loadPngRGBA("assets/logo.png", px, w, h)) return false;
   // luminance -> alpha: chrome letters (bright) opaque, backdrop (dark) clear
   for (int i = 0; i < w * h; i++) {
     const int j = i * 4;
@@ -186,7 +205,7 @@ bool loadLogoTexture(LogoAsset& out) {
 bool loadPngAsset(const std::string& file, Texture& out) {
   std::vector<unsigned char> px;
   int w = 0, h = 0;
-  if (!loadPngRGBA(assetDir() + "/" + file, px, w, h)) return false;
+  if (!loadPngRGBA("assets/" + file, px, w, h)) return false;
   out = Texture::fromRGBA(w, h, px.data(),
                           {::gl::LINEAR, ::gl::LINEAR, ::gl::CLAMP_TO_EDGE, false});
   std::printf("[ASSETS] %s loaded (%dx%d)\n", file.c_str(), w, h);

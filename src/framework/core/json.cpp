@@ -188,6 +188,10 @@ Value parseFile(const std::string& path) {
   return parse(ss.str());
 }
 
+Value parseText(const std::string& text) {
+  return parse(text);
+}
+
 // ---------------------------------------------------------------------------
 // serializer
 // ---------------------------------------------------------------------------

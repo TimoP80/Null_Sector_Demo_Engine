@@ -30,6 +30,9 @@
       { href: "assets.html", num: "10", label: "Assets & Reload" },
       { href: "plugins.html", num: "11", label: "Plugins" },
       { href: "first-effect.html", num: "12", label: "First Effect" }
+    ]},
+    { group: "Distribution", items: [
+      { href: "packaging.html", num: "13", label: "VFS & Packaging" }
     ]}
   ];
 
