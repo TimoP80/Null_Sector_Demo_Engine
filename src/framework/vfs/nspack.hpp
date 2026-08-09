@@ -26,7 +26,8 @@
 //     u64    offset           absolute file offset of the payload
 //     u64    packedSize       bytes stored in the package
 //     u64    size             uncompressed size
-//     u32    method           0 = store (packedSize == size)
+//     u32    method           0 = store (packedSize == size),
+//                            1 = DEFLATE (zlib stream; size > packedSize)
 //     u32    flags            0
 //     u64    hash             FNV-1a 64 of the UNCOMPRESSED bytes
 //
@@ -34,8 +35,10 @@
 //
 // Validation is defensive: a truncated file, out-of-range offset/size, bad
 // magic, unsupported version, unsafe virtual path, or checksum mismatch is
-// detected and reported instead of crashing. No compression in v1 - method 0
-// only - so a packaged production is byte-identical to the dev tree.
+// detected and reported instead of crashing. Method 1 is DEFLATE (a zlib
+// stream, produced/consumed via the vendored miniz in miniz/): the payload
+// is compressed but the hash still covers the UNCOMPRESSED bytes, so an
+// asset's integrity check means the same thing regardless of method.
 //
 //   PackageWriter  builds a .nsp (buffers the files, writes on finish()).
 //   PackageReader  opens + validates a .nsp and serves random-access reads.
@@ -53,7 +56,8 @@ namespace ns {
 constexpr char kNspMagic[4] = {'N', 'S', 'P', 'K'};
 constexpr uint32_t kNspVersion = 1;
 constexpr uint64_t kNspHeaderSize = 48;
-constexpr uint32_t kNspMethodStore = 0;
+constexpr uint32_t kNspMethodStore = 0;   // stored as-is (packedSize == size)
+constexpr uint32_t kNspMethodDeflate = 1;  // DEFLATE (zlib stream) via miniz
 
 /** metadata marker entry: its content is the production .nsd virtual path
  *  (e.g. "data/demo.nsd") so --play knows what to run. */
@@ -77,10 +81,15 @@ public:
   bool begin(const std::string& outPath, std::string* err);
 
   /** stage a file (replaces an existing entry with the same virtual path).
-   *  The virtual path is normalized; unsafe paths are rejected. */
+   *  The virtual path is normalized; unsafe paths are rejected. compress is
+   *  a hint only: finish() DEFLATEs the payload and keeps it ONLY when the
+   *  compressed form is actually smaller, so already-compressed or incompress-
+   *  ible content always stays stored (method 0). The stored hash is always
+   *  over the uncompressed bytes. */
   bool addFile(const std::string& vpath, const std::vector<uint8_t>& data,
-               std::string* err);
-  bool addFile(const std::string& vpath, const std::string& text, std::string* err);
+               std::string* err, bool compress = false);
+  bool addFile(const std::string& vpath, const std::string& text,
+               std::string* err, bool compress = false);
 
   /** record the production .nsd virtual path; finish() stores it as the
    *  .ns-production marker entry so --play knows what to run. The path must
@@ -94,16 +103,29 @@ public:
   size_t fileCount() const { return files_.size(); }
   uint64_t totalBytes() const { return totalBytes_; }
 
+  /** per-method write totals (raw = uncompressed source bytes, stored =
+   *  bytes actually written to the package) - filled in by finish(). */
+  struct MethodStats {
+    size_t count = 0;
+    uint64_t rawBytes = 0, storedBytes = 0;
+  };
+  struct WriteStats {
+    MethodStats store, deflate;
+  };
+  const WriteStats& stats() const { return stats_; }
+
 private:
   struct Entry {
     std::string name;
     std::vector<uint8_t> data;
     uint64_t hash = 0;
+    bool compressHint = false;
   };
   std::string outPath_;
   std::map<std::string, Entry> files_;
   std::string production_;  // .ns-production marker content (virtual path)
   uint64_t totalBytes_ = 0;
+  WriteStats stats_;
 };
 
 // ---------------------------------------------------------------------------
@@ -123,6 +145,8 @@ public:
   bool has(const std::string& vpath) const;
   /** uncompressed size, 0 when missing */
   uint64_t fileSize(const std::string& vpath) const;
+  /** storage method of an entry (kNspMethodStore / kNspMethodDeflate). */
+  uint32_t method(const std::string& vpath) const;
 
   /** read + hash-verify a file. Empty on a missing file or checksum
    *  mismatch (lastError() names the failure). */

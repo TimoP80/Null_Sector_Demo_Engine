@@ -41,7 +41,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   empty / binary / large files, invalid header, invalid version, invalid
   offsets, truncated package, checksum failure), dev↔package equivalence and
   FNV-1a known-vector regression (canonical isthe.com vectors incl. an
-  embedded-NUL case) — 626 checks total
+  embedded-NUL case), compressed round-trip, keep-only-if-smaller, corrupt
+  compressed payloads — 652 checks total
 - **Package reader hardening** — open() keeps only the header + manifest in
   RAM and reads payloads on demand (seek + read per asset), so a multi-GB
   package no longer costs its whole size in memory; all bounds arithmetic is
@@ -50,6 +51,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - **Package directory index** — built once at open(); `PackageFileSystem`
   `list()`/`stat()` answer from the index in O(children) instead of scanning
   every packaged file
+- **DEFLATE compression** — .nsp method 1 via the vendored public-domain
+  miniz (pinned commit, `src/framework/vfs/miniz/`). The packer gives every
+  file a compress hint by extension (already-compressed audio/image/archive
+  formats stay stored) and the writer keeps the DEFLATE form only when it is
+  genuinely smaller, so the policy can never bloat a package. The integrity
+  hash always covers the UNCOMPRESSED bytes, so checks mean the same thing
+  for both methods; the reader decompresses transparently behind the same
+  VFS API, and the packer report now shows raw/stored sizes, the overall
+  compression percentage and a per-method breakdown
 - **Documentation** — `docs/packaging.html` (VFS architecture, `.nsp` format,
   packing & playback, virtual path conventions, internals) linked from the
   docs nav, plus a VFS/packaging section in `README.md`

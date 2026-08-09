@@ -47,6 +47,15 @@ add_library(ns_framework STATIC
   src/framework/vfs/directoryfs.cpp
   src/framework/vfs/nspack.cpp
   src/framework/vfs/packagefs.cpp
+  src/framework/vfs/miniz/miniz.c
+  src/framework/vfs/miniz/miniz_tdef.c
+  src/framework/vfs/miniz/miniz_tinfl.c
+)
+set_source_files_properties(
+  src/framework/vfs/miniz/miniz.c
+  src/framework/vfs/miniz/miniz_tdef.c
+  src/framework/vfs/miniz/miniz_tinfl.c
+  PROPERTIES COMPILE_DEFINITIONS "MINIZ_NO_ARCHIVE_APIS"
 )
 target_include_directories(ns_framework PUBLIC src)
 target_compile_definitions(ns_framework PUBLIC

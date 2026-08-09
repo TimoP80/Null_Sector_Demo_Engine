@@ -1,3 +1,6 @@
+// only the deflate/inflate core is needed; archive APIs compile out
+#define MINIZ_NO_ARCHIVE_APIS
+#include "framework/vfs/miniz/miniz.h"
 #include "framework/vfs/nspack.hpp"
 #include "framework/vfs/vfs.hpp"
 
@@ -41,6 +44,41 @@ constexpr uint64_t kMaxFileCount = (1ull << 24);   // sanity cap
 constexpr uint32_t kMaxNameLen = 4096;
 constexpr uint64_t kMaxFileSize = (1ull << 40);    // 1 TiB cap
 
+/** DEFLATE (zlib stream) via miniz. miniz's mz_ulong is 32-bit on Windows,
+ *  so refuse inputs that would not fit - the practical asset ceiling here
+ *  is far below 4 GiB anyway. Returns false when the input is empty or the
+ *  stream could not be produced. */
+bool deflateBytes(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
+  if (in.empty() || in.size() > 0xFFFFFFFFull) return false;
+  mz_ulong bound = mz_compressBound((mz_ulong)in.size());
+  out.resize(bound);
+  mz_ulong outLen = bound;
+  const int rc =
+      mz_compress2(out.data(), &outLen, in.data(), (mz_ulong)in.size(),
+                   MZ_DEFAULT_COMPRESSION);
+  if (rc != MZ_OK) return false;
+  out.resize(outLen);
+  return true;
+}
+
+/** Inflate a zlib stream; the decompressed size must match expectedOut. */
+bool inflateBytes(const uint8_t* in, size_t inLen, size_t expectedOut,
+                  std::vector<uint8_t>& out) {
+  if (expectedOut == 0) {
+    out.clear();
+    return true;
+  }
+  if (inLen > 0xFFFFFFFFull || expectedOut > 0xFFFFFFFFull) return false;
+  out.resize(expectedOut);
+  mz_ulong outLen = (mz_ulong)expectedOut;
+  const int rc = mz_uncompress(out.data(), &outLen, in, (mz_ulong)inLen);
+  if (rc != MZ_OK || outLen != expectedOut) {
+    out.clear();
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -70,7 +108,7 @@ bool PackageWriter::begin(const std::string& outPath, std::string* err) {
 }
 
 bool PackageWriter::addFile(const std::string& vpath, const std::vector<uint8_t>& data,
-                            std::string* err) {
+                            std::string* err, bool compress) {
   const std::string n = normalizeVirtualPath(vpath);
   if (n.empty()) {
     if (err) *err = "refusing to package unsafe virtual path: " + vpath;
@@ -85,14 +123,15 @@ bool PackageWriter::addFile(const std::string& vpath, const std::vector<uint8_t>
   e.name = n;
   e.data = data;
   e.hash = fnv1a64(data);
+  e.compressHint = compress;
   totalBytes_ = totalBytes_ - prev + (uint64_t)e.data.size();
   return true;
 }
 
 bool PackageWriter::addFile(const std::string& vpath, const std::string& text,
-                            std::string* err) {
+                            std::string* err, bool compress) {
   std::vector<uint8_t> bytes(text.begin(), text.end());
-  return addFile(vpath, bytes, err);
+  return addFile(vpath, bytes, err, compress);
 }
 
 bool PackageWriter::setProduction(const std::string& vpath, std::string* err) {
@@ -135,6 +174,31 @@ bool PackageWriter::finish(std::string* err) {
   std::sort(entries.begin(), entries.end(),
             [](const Entry* a, const Entry* b) { return a->name < b->name; });
 
+  // decide the stored form of every entry up front: DEFLATE when the hint is
+  // set AND the compressed stream is genuinely smaller, otherwise store. The
+  // hash always covers the UNCOMPRESSED bytes, so integrity means the same
+  // thing for both methods.
+  stats_ = WriteStats();
+  std::vector<std::vector<uint8_t>> payloads(entries.size());
+  std::vector<uint32_t> methods(entries.size(), kNspMethodStore);
+  for (size_t i = 0; i < entries.size(); i++) {
+    const Entry& e = *entries[i];
+    std::vector<uint8_t> compressed;
+    uint32_t method = kNspMethodStore;
+    const std::vector<uint8_t>* payload = &e.data;
+    if (e.compressHint && deflateBytes(e.data, compressed) &&
+        compressed.size() < e.data.size()) {
+      method = kNspMethodDeflate;
+      payload = &compressed;
+    }
+    payloads[i] = *payload;
+    methods[i] = method;
+    MethodStats& ms = method == kNspMethodDeflate ? stats_.deflate : stats_.store;
+    ms.count++;
+    ms.rawBytes += (uint64_t)e.data.size();
+    ms.storedBytes += (uint64_t)payload->size();
+  }
+
   // manifest table
   std::string manifest;
   std::vector<uint64_t> dataOffsets(entries.size(), 0);
@@ -148,13 +212,13 @@ bool PackageWriter::finish(std::string* err) {
     // pad the entry to an 8-byte boundary
     while ((manifest.size() - entryStart) % 8 != 0) manifest.push_back('\0');
     putU64(manifest, 0);  // offset - patched below
-    putU64(manifest, (uint64_t)e.data.size());  // packedSize == size (method 0)
-    putU64(manifest, (uint64_t)e.data.size());  // uncompressed size
-    putU32(manifest, kNspMethodStore);
+    putU64(manifest, (uint64_t)payloads[i].size());  // bytes stored in package
+    putU64(manifest, (uint64_t)e.data.size());       // uncompressed size
+    putU32(manifest, methods[i]);
     putU32(manifest, 0);  // flags
     putU64(manifest, e.hash);
     dataOffsets[i] = cursor;
-    cursor += (uint64_t)e.data.size();
+    cursor += (uint64_t)payloads[i].size();
   }
 
   const uint64_t manifestOffset = kNspHeaderSize;
@@ -191,9 +255,9 @@ bool PackageWriter::finish(std::string* err) {
   const uint64_t pad = dataOffset - (manifestOffset + manifestSize);
   for (uint64_t i = 0; i < pad; i++) f.put('\0');
   for (size_t i = 0; i < entries.size(); i++) {
-    const Entry& e = *entries[i];
-    if (!e.data.empty())
-      f.write((const char*)e.data.data(), (std::streamsize)e.data.size());
+    const std::vector<uint8_t>& payload = payloads[i];
+    if (!payload.empty())
+      f.write((const char*)payload.data(), (std::streamsize)payload.size());
   }
   f.flush();
   if (!f) {
@@ -347,14 +411,18 @@ bool PackageReader::open(const std::string& path, std::string* err) {
                       name + "'";
       return false;
     }
-    if (en.method != kNspMethodStore) {
+    if (en.method != kNspMethodStore && en.method != kNspMethodDeflate) {
       if (err) *err = "package uses unsupported compression method " +
                       std::to_string(en.method) + " for '" + name + "'";
       return false;
     }
-    if (en.packedSize != en.size) {
+    if (en.method == kNspMethodStore && en.packedSize != en.size) {
       if (err) *err = "package entry packed/uncompressed size mismatch (method 0): '" +
                       name + "'";
+      return false;
+    }
+    if (en.method == kNspMethodDeflate && en.size == 0) {
+      if (err) *err = "package entry deflate with empty payload: '" + name + "'";
       return false;
     }
     if (en.size > kMaxFileSize) {
@@ -433,6 +501,12 @@ uint64_t PackageReader::fileSize(const std::string& vpath) const {
   return it == entries_.end() ? 0 : it->second.size;
 }
 
+uint32_t PackageReader::method(const std::string& vpath) const {
+  const std::string n = normalizeVirtualPath(vpath);
+  const auto it = entries_.find(n);
+  return it == entries_.end() ? kNspMethodStore : it->second.method;
+}
+
 std::vector<uint8_t> PackageReader::read(const std::string& vpath) const {
   lastError_.clear();
   const std::string n = normalizeVirtualPath(vpath);
@@ -457,14 +531,23 @@ std::vector<uint8_t> PackageReader::read(const std::string& vpath) const {
     lastError_ = "cannot reopen package: " + path_;
     return {};
   }
-  std::vector<uint8_t> out((size_t)e.packedSize);
-  if (!out.empty()) {
+  std::vector<uint8_t> stored((size_t)e.packedSize);
+  if (!stored.empty()) {
     f.seekg((std::streamoff)e.offset, std::ios::beg);
-    f.read((char*)out.data(), (std::streamsize)out.size());
+    f.read((char*)stored.data(), (std::streamsize)stored.size());
   }
-  if (f.gcount() != (std::streamsize)out.size()) {
+  if (f.gcount() != (std::streamsize)stored.size()) {
     lastError_ = "package entry short read (truncated?): " + n;
     return {};
+  }
+  std::vector<uint8_t> out;
+  if (e.method == kNspMethodDeflate) {
+    if (!inflateBytes(stored.data(), stored.size(), (size_t)e.size, out)) {
+      lastError_ = "corrupt compressed data: " + n;
+      return {};
+    }
+  } else {
+    out = std::move(stored);
   }
   if (fnv1a64(out) != e.hash) {
     lastError_ = "checksum mismatch (corrupt data): " + n;
@@ -513,14 +596,23 @@ bool PackageReader::verifyAll(std::string* err) const {
       if (err) *err = "package entry out of range: " + e.name;
       return false;
     }
-    std::vector<uint8_t> buf((size_t)e.packedSize);
-    if (!buf.empty()) {
+    std::vector<uint8_t> stored((size_t)e.packedSize);
+    if (!stored.empty()) {
       f.seekg((std::streamoff)e.offset, std::ios::beg);
-      f.read((char*)buf.data(), (std::streamsize)buf.size());
-      if (f.gcount() != (std::streamsize)buf.size()) {
+      f.read((char*)stored.data(), (std::streamsize)stored.size());
+      if (f.gcount() != (std::streamsize)stored.size()) {
         if (err) *err = "package entry short read: " + e.name;
         return false;
       }
+    }
+    std::vector<uint8_t> buf;
+    if (e.method == kNspMethodDeflate) {
+      if (!inflateBytes(stored.data(), stored.size(), (size_t)e.size, buf)) {
+        if (err) *err = "package entry corrupt compressed data: " + e.name;
+        return false;
+      }
+    } else {
+      buf = std::move(stored);
     }
     const uint64_t h = fnv1a64(buf);
     if (h != e.hash) {

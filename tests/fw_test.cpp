@@ -1808,6 +1808,99 @@ static void testPackageFormat() {
 
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// testPackageCompression - DEFLATE round-trip, keep-only-if-smaller, and the
+// integrity hash covering the UNCOMPRESSED bytes.
+// ---------------------------------------------------------------------------
+static void testPackageCompression() {
+  const std::string dir = "fw_vfs_tmp_comp";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::filesystem::create_directories(dir, ec);
+  const std::string pkg = dir + "/comp.nsp";
+
+  // highly compressible blob (repeated lines of text)
+  std::vector<uint8_t> text;
+  {
+    const std::string line = "the quick brown fox jumps over the lazy dog";
+    text.reserve(line.size() * 20000);
+    for (int i = 0; i < 20000; i++)
+      text.insert(text.end(), line.begin(), line.end());
+  }
+  // incompressible-looking payload (LCG noise)
+  std::vector<uint8_t> noise(65536);
+  {
+    uint32_t s = 0x12345678u;
+    for (size_t i = 0; i < noise.size(); i++) {
+      s = s * 1664525u + 1013904223u;
+      noise[i] = (uint8_t)(s >> 24);
+    }
+  }
+
+  {
+    PackageWriter w;
+    std::string err;
+    CHECK(w.begin(pkg, &err), "comp: begin");
+    CHECK(w.addFile("data/text.txt", text, &err, true), "comp: add text");
+    CHECK(w.addFile("data/noise.bin", noise, &err, true), "comp: add noise");
+    CHECK(w.addFile("data/small.txt", "hi", &err, true), "comp: add small");
+    CHECK(w.addFile("data/empty.bin", std::vector<uint8_t>(), &err, true),
+          "comp: add empty");
+    CHECK(w.setProduction("data/text.txt", &err), "comp: marker");
+    CHECK(w.finish(&err), "comp: finish");
+
+    CHECK(w.stats().deflate.count == 1, "comp: one deflated entry");
+    CHECK(w.stats().deflate.rawBytes == text.size(), "comp: deflate raw bytes");
+    CHECK(w.stats().deflate.storedBytes < text.size(), "comp: deflate shrank");
+    CHECK(w.stats().store.count == 4, "comp: four stored entries (incl. marker)");
+    CHECK(w.stats().store.storedBytes ==
+              noise.size() + 2 + std::string("data/text.txt").size(),
+          "comp: stored bytes (noise + small + marker)");
+  }
+
+  {
+    PackageReader r;
+    std::string err;
+    CHECK(r.open(pkg, &err), "comp: open");
+    CHECK(r.method("data/text.txt") == kNspMethodDeflate, "comp: text method");
+    CHECK(r.method("data/noise.bin") == kNspMethodStore, "comp: noise method");
+    CHECK(r.method("data/small.txt") == kNspMethodStore, "comp: small method");
+    CHECK(r.method("data/empty.bin") == kNspMethodStore, "comp: empty method");
+    CHECK(r.read("data/text.txt") == text, "comp: text round-trip");
+    CHECK(r.read("data/noise.bin") == noise, "comp: noise round-trip");
+    CHECK(r.readText("data/small.txt") == "hi", "comp: small round-trip");
+    CHECK(r.read("data/empty.bin").empty(), "comp: empty round-trip");
+    CHECK(r.fileSize("data/text.txt") == text.size(),
+          "comp: fileSize reports uncompressed size");
+    CHECK(r.verifyAll(&err), "comp: verifyAll clean");
+  }
+
+  // corruption inside the COMPRESSED payload: the read must be rejected.
+  // text.txt sorts last, so its deflate stream occupies the file tail.
+  {
+    const std::string cp = dir + "/comp_corrupt.nsp";
+    std::filesystem::copy_file(pkg, cp, ec);
+    const uint64_t sz = (uint64_t)std::filesystem::file_size(cp);
+    {
+      std::fstream f(cp, std::ios::binary | std::ios::in | std::ios::out);
+      f.seekp((std::streamoff)(sz - 16));
+      char b = 0;
+      f.read(&b, 1);
+      b = (char)(b ^ 0x55);
+      f.seekp((std::streamoff)(sz - 16));
+      f.write(&b, 1);
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(r.open(cp, &err), "comp: corrupt open");
+    CHECK(r.read("data/text.txt").empty(), "comp: corrupt payload rejected");
+    CHECK(!r.lastError().empty(), "comp: corrupt payload reports error");
+  }
+
+  std::filesystem::remove_all(dir, ec);
+}
+
+
 // testPackageFS - the .nsp mounted as a VirtualFileSystem.
 // ---------------------------------------------------------------------------
 static void testPackageFS() {
@@ -1959,6 +2052,7 @@ static void runAll() {
   ns::testDirectoryFS();
   ns::testFNV();
   ns::testPackageFormat();
+  ns::testPackageCompression();
   ns::testPackageFS();
   ns::testDevPackageEquivalence();
 }

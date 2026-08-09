@@ -96,6 +96,23 @@ bool isAudioFile(const std::string& v) {
   return ext == ".wav" || ext == ".mp3" || ext == ".ogg" || ext == ".flac";
 }
 
+// DEFLATE policy: already-compressed binary formats (audio, images, archives,
+// executables) are stored as-is - compressing them costs CPU time and usually
+// grows the file. Everything else gets the compress hint; the writer keeps
+// the compressed form ONLY when it is actually smaller, so this policy can
+// never bloat a package, even for an unknown extension.
+bool shouldCompress(const std::string& v) {
+  const size_t dot = v.find_last_of('.');
+  if (dot == std::string::npos) return true;
+  std::string ext = v.substr(dot);
+  for (auto& ch : ext) ch = (char)std::tolower((unsigned char)ch);
+  static const std::set<std::string> incompressible = {
+      ".mp3",  ".ogg",  ".flac", ".wav", ".aiff", ".png", ".jpg", ".jpeg",
+      ".bmp",  ".tga",  ".gif",  ".webp", ".zip", ".gz",  ".7z",  ".rar",
+      ".nsp",  ".exe",  ".dll",  ".so",  ".dylib"};
+  return incompressible.count(ext) == 0;
+}
+
 }  // namespace
 
 int runProductionPacker(const std::string& rootDir, const std::string& scriptArg,
@@ -275,7 +292,7 @@ int runProductionPacker(const std::string& rootDir, const std::string& scriptArg
                    v.c_str());
       continue;
     }
-    if (!pw.addFile(v, dev.read(v), &err)) {
+    if (!pw.addFile(v, dev.read(v), &err, shouldCompress(v))) {
       std::fprintf(stderr, "[PACK] %s\n", err.c_str());
       return 1;
     }
@@ -299,11 +316,27 @@ int runProductionPacker(const std::string& rootDir, const std::string& scriptArg
   }
   const uint64_t pkgSize =
       (uint64_t)std::filesystem::file_size(outPath);
+  const PackageWriter::WriteStats& st = pw.stats();
+  const uint64_t storedTotal = st.store.storedBytes + st.deflate.storedBytes;
 
   std::fprintf(stderr, "\nFiles:       %zu\n", pw.fileCount());
   std::fprintf(stderr, "Raw size:    %.1f MB\n", raw / 1048576.0);
-  std::fprintf(stderr, "Package:     %.1f MB\n", pkgSize / 1048576.0);
+  std::fprintf(stderr, "Stored size: %.1f MB\n", storedTotal / 1048576.0);
+  std::fprintf(stderr, "Compression: %.1f%%\n",
+               raw ? 100.0 * (1.0 - (double)storedTotal / (double)raw) : 0.0);
+
+  if (st.deflate.count > 0) {
+    std::fprintf(stderr, "\n  DEFLATE: %zu files\n", st.deflate.count);
+    std::fprintf(stderr, "           %.1f MB -> %.1f MB\n",
+                 st.deflate.rawBytes / 1048576.0, st.deflate.storedBytes / 1048576.0);
+  }
+  if (st.store.count > 0) {
+    std::fprintf(stderr, "  STORED:  %zu files\n", st.store.count);
+    std::fprintf(stderr, "           %.1f MB -> %.1f MB\n",
+                 st.store.rawBytes / 1048576.0, st.store.storedBytes / 1048576.0);
+  }
   std::fprintf(stderr, "\nCreated:\n  %s\n", outPath.c_str());
+  (void)pkgSize;
   return 0;
 }
 

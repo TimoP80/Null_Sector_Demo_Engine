@@ -147,9 +147,14 @@ loaders never know where the bytes came from.
 ```
 
 The `.nsp` format is a simple versioned container (magic `NSPK`, file table,
-FNV-1a integrity hashes) defined in `src/framework/vfs/`. The packer reports
-what it discovered and skips native plugins (documented limitation). See
-**packaging.html** in the docs for the full format and conventions.
+FNV-1a integrity hashes) defined in `src/framework/vfs/`. Payloads are stored
+as-is or DEFLATE-compressed (public-domain miniz, vendored under
+`src/framework/vfs/miniz/`): the packer chooses by extension and only keeps
+the compressed form when it is actually smaller, and the integrity hash
+always covers the uncompressed bytes. The packer reports what it discovered,
+the raw/stored sizes and per-method breakdown, and skips native plugins
+(documented limitation). See **packaging.html** in the docs for the full
+format and conventions.
 
 ## Documentation
 

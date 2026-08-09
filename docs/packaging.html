@@ -91,14 +91,15 @@ data/neural_dust/track.mp3</pre>
 
       <section id="nsp-format">
         <h2>The .nsp package format</h2>
-        <p class="sec-sub">A deliberately simple custom format — no third-party dependencies, versioned for the future:</p>
+        <p class="sec-sub">A deliberately simple custom format — the only third-party piece is the public-domain <a href="https://github.com/richgel999/miniz">miniz</a> DEFLATE (vendored under <code>src/framework/vfs/miniz/</code>), versioned for the future:</p>
         <div class="code" data-lang="text">
           <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">layout</span><span class="lang">text</span></div>
           <pre>Header    magic "NSPK" + format version + counts + data offset
-Manifest  one entry per file: virtual path, offset, uncompressed size,
-          compression method, FNV-1a hash
-File data the bytes, back to back (uncompressed today; the method field
-          leaves room for compression without breaking old packages)</pre>
+Manifest  one entry per file: virtual path, offset, stored size,
+          uncompressed size, compression method, FNV-1a hash
+File data the bytes, back to back (method 0 = stored as-is, method 1 =
+          DEFLATE via the vendored miniz). The hash always covers the
+          UNCOMPRESSED bytes, so integrity means the same thing for both</pre>
         </div>
         <p class="sec-sub">The reader validates aggressively and fails safely:</p>
         <ul>
@@ -120,7 +121,8 @@ File data the bytes, back to back (uncompressed today; the method field
           <li>other <code>.nsd</code> scripts / scenes / timelines reachable from the production</li>
           <li>audio: an explicit <code>--track=FILE</code>, else a soundtrack next to the script (its directory or the folder named after it, <code>data/foo.nsd</code> + <code>data/foo/track.mp3</code>) — sibling productions' tracks never leak in</li>
         </ul>
-        <p>Plugins are native libraries and cannot be loaded from inside a package — the packer warns and skips them (a documented limitation). The report lists every kind it found and the package size:</p>
+        <p>Plugins are native libraries and cannot be loaded from inside a package — the packer warns and skips them (a documented limitation).</p>
+        <p><strong>Compression.</strong> Already-compressed formats (MP3/OGG/FLAC/WAV, PNG/JPG, ZIP, executables) are stored as-is — DEFLATE would cost CPU time and usually grow the file. Everything else (GLSL, .nsd, JSON, OBJ, TTF, …) gets a compress hint, and the writer keeps the DEFLATE form <em>only when it is genuinely smaller</em>, so the policy can never bloat a package even for an unknown extension. The reader decompresses transparently behind the same VFS API — neither the asset loaders nor the rest of the engine know a payload is compressed. The report lists every kind it found, the raw/stored sizes, and the per-method breakdown:</p>
         <div class="code" data-lang="text">
           <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">stderr</span><span class="lang">text</span></div>
           <pre>Null Sector Production Packer
@@ -140,7 +142,13 @@ Assets:
 
 Files:       93
 Raw size:    3.8 MB
-Package:     3.8 MB
+Stored size: 3.5 MB
+Compression: 7.4%
+
+  DEFLATE: 92 files
+           0.5 MB -> 0.2 MB
+  STORED:  2 files
+           3.3 MB -> 3.3 MB
 
 Created:
   GhostInTheMachine.nsp</pre>
