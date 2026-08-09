@@ -13,9 +13,14 @@
 //
 // Longest-prefix wins, so "data/..." never falls through to the catch-all.
 // Every lookup normalizes the virtual path first and rejects traversal
-// (../, absolute, drive letters), so a virtual path can never escape the
-// mounts. This is the VFS the app installs for normal development playback;
-// the editor keeps direct std::filesystem access for authoring.
+// (../, absolute, drive letters), so a VIRTUAL path can never escape the
+// mounts. Note the boundary of that guarantee: DirectoryFS then resolves to
+// the real filesystem and TRUSTS the mounted development tree itself. A
+// symlink/junction placed inside a mount resolves to wherever it points -
+// that is dev-tooling behavior, not a security sandbox, and the packer
+// documents the same trust boundary. This is the VFS the app installs for
+// normal development playback; the editor keeps direct std::filesystem
+// access for authoring.
 // ---------------------------------------------------------------------------
 #pragma once
 

@@ -44,6 +44,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -58,10 +59,13 @@ constexpr uint32_t kNspMethodStore = 0;
  *  (e.g. "data/demo.nsd") so --play knows what to run. */
 constexpr const char* kNspProductionMarker = ".ns-production";
 
-/** FNV-1a 64 - lightweight non-cryptographic content hash (Phase 9). */
+/** FNV-1a 64 - lightweight non-cryptographic content hash (Phase 9).
+ *  Canonical 64-bit FNV-1a: offset basis 14695981039346656037
+ *  (0xcbf29ce484222325), prime 1099511628211. Verified against the
+ *  reference test vectors on isthe.com/chongo/tech/comp/fnv. */
 uint64_t fnv1a64(const uint8_t* data, size_t n);
 inline uint64_t fnv1a64(const std::vector<uint8_t>& v) {
-  return v.empty() ? 1469598103934665603ull : fnv1a64(v.data(), v.size());
+  return v.empty() ? 14695981039346656037ull : fnv1a64(v.data(), v.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +139,12 @@ public:
   /** most recent error from read()/readText() ("" when none) */
   std::string lastError() const { return lastError_; }
 
+  /** directory index (built at open): does a virtual directory exist? */
+  bool isDirectory(const std::string& vdir) const;
+  /** direct children of a virtual directory as FULL virtual paths
+   *  (files and subdirs; "" = root). Empty when the dir doesn't exist. */
+  std::vector<std::string> listDirectory(const std::string& vdir) const;
+
 private:
   struct Entry {
     std::string name;
@@ -145,9 +155,12 @@ private:
     uint64_t hash = 0;
   };
   std::string path_;
+  uint64_t fileSize_ = 0;  // validated at open; read() bounds against this
   std::map<std::string, Entry> entries_;
+  std::map<std::string, std::set<std::string>> dirs_;  // parent -> children
   mutable std::string lastError_;
-  std::vector<uint8_t> raw_;  // whole package bytes (v1 is store-only)
+  // no whole-package buffer: open() keeps the header + manifest only, and
+  // read() opens the file and seeks to each entry's offset on demand.
 };
 
 }  // namespace ns

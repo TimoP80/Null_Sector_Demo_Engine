@@ -101,9 +101,9 @@ VirtualFileSystem& runtimeFS() {
 }
 
 bool runtimeFSIsPackage() {
-  // PackageFileSystem sets a flag; the default/install path never does.
-  // Implemented via a dynamic cast so the framework core has no hard
-  // dependency on the package reader (tests build the lib without it).
+  // The virtual isPackage() hook on the VFS interface keeps the framework
+  // core free of any hard dependency on the package reader: the default
+  // DirectoryFileSystem never sets it, PackageFileSystem does.
   return fsSlot() != nullptr && fsSlot()->isPackage();
 }
 

@@ -39,8 +39,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - **Framework tests** — DirectoryFS (existing/missing, text & binary reads,
   normalization, traversal rejection), package format round-trip (multiple /
   empty / binary / large files, invalid header, invalid version, invalid
-  offsets, truncated package, checksum failure) and dev↔package equivalence
-  (603 checks total)
+  offsets, truncated package, checksum failure), dev↔package equivalence and
+  FNV-1a known-vector regression (canonical isthe.com vectors incl. an
+  embedded-NUL case) — 626 checks total
+- **Package reader hardening** — open() keeps only the header + manifest in
+  RAM and reads payloads on demand (seek + read per asset), so a multi-GB
+  package no longer costs its whole size in memory; all bounds arithmetic is
+  overflow-safe; nonzero header/entry flags and reserved fields are rejected,
+  `dataOffset` must be 8-aligned, and overlapping payload ranges are detected
+- **Package directory index** — built once at open(); `PackageFileSystem`
+  `list()`/`stat()` answer from the index in O(children) instead of scanning
+  every packaged file
 - **Documentation** — `docs/packaging.html` (VFS architecture, `.nsp` format,
   packing & playback, virtual path conventions, internals) linked from the
   docs nav, plus a VFS/packaging section in `README.md`
@@ -59,6 +68,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Dev-tree track discovery walked nothing at the virtual root — `list("")` on
   the directory filesystem now resolves the catch-all mount (while unsafe
   paths like `../x` are still rejected)
+- FNV-1a 64 offset basis was missing its final digit
+  (`1469598103934665603` → canonical `14695981039346656037`) in the hash
+  function and the empty-vector overload — both agree now and match the
+  reference vectors
+- Package integrity checks could wrap on crafted offsets (`offset + size` over
+  2^64) — now checked overflow-safe against the file size
+- `verifyAll` reported a spurious short read for empty payloads (stale
+  `gcount()` from the previous entry)
 
 ## [0.1.0] — 2026-08-09
 

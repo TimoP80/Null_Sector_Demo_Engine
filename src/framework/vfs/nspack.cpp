@@ -41,25 +41,13 @@ constexpr uint64_t kMaxFileCount = (1ull << 24);   // sanity cap
 constexpr uint32_t kMaxNameLen = 4096;
 constexpr uint64_t kMaxFileSize = (1ull << 40);    // 1 TiB cap
 
-std::vector<uint8_t> readWholeFile(const std::string& path, uint64_t* sizeOut) {
-  std::vector<uint8_t> out;
-  std::ifstream f(path, std::ios::binary | std::ios::ate);
-  if (!f) return out;
-  const std::streamoff end = f.tellg();
-  if (end <= 0) return out;
-  f.seekg(0, std::ios::beg);
-  out.resize((size_t)end);
-  if (!out.empty()) f.read((char*)out.data(), (std::streamsize)out.size());
-  if (sizeOut) *sizeOut = (uint64_t)out.size();
-  return out;
-}
 }  // namespace
 
 // ---------------------------------------------------------------------------
 // FNV-1a 64
 // ---------------------------------------------------------------------------
 uint64_t fnv1a64(const uint8_t* data, size_t n) {
-  uint64_t h = 1469598103934665603ull;  // FNV offset basis
+  uint64_t h = 14695981039346656037ull;  // FNV-1a 64 offset basis (0xcbf29ce484222325)
   for (size_t i = 0; i < n; i++) {
     h ^= data[i];
     h *= 1099511628211ull;  // FNV prime
@@ -221,21 +209,40 @@ bool PackageWriter::finish(std::string* err) {
 // ---------------------------------------------------------------------------
 // reader
 // ---------------------------------------------------------------------------
+// open() validates the header + manifest and keeps ONLY those in RAM (plus
+// the per-entry index). Payloads are read on demand: read() opens the file
+// and seeks to the entry's offset, so a multi-GB package costs a few KB of
+// memory, not the whole archive. All bounds arithmetic is overflow-safe
+// (offset + size can never wrap past the file), and entries must not
+// overlap.
+// ---------------------------------------------------------------------------
 bool PackageReader::open(const std::string& path, std::string* err) {
   entries_.clear();
+  dirs_.clear();
   path_.clear();
   lastError_.clear();
-  uint64_t fileSize = 0;
-  const std::vector<uint8_t> raw = readWholeFile(path, &fileSize);
-  if (raw.empty()) {
-    if (err) *err = "cannot open package (missing or empty): " + path;
-    return false;
-  }
-  if (fileSize < kNspHeaderSize) {
+  fileSize_ = 0;
+
+  std::error_code ec;
+  const uint64_t fsize = std::filesystem::file_size(path, ec);
+  if (ec || fsize < kNspHeaderSize) {
     if (err) *err = "package too small for header: " + path;
     return false;
   }
-  const uint8_t* h = raw.data();
+  fileSize_ = fsize;
+
+  std::ifstream f(path, std::ios::binary);
+  if (!f) {
+    if (err) *err = "cannot open package: " + path;
+    return false;
+  }
+  uint8_t header[kNspHeaderSize];
+  f.read((char*)header, (std::streamsize)kNspHeaderSize);
+  if (f.gcount() != (std::streamsize)kNspHeaderSize) {
+    if (err) *err = "package too small for header: " + path;
+    return false;
+  }
+  const uint8_t* h = header;
   if (std::memcmp(h, kNspMagic, 4) != 0) {
     if (err) *err = "not a Null Sector package (bad magic): " + path;
     return false;
@@ -246,6 +253,11 @@ bool PackageReader::open(const std::string& path, std::string* err) {
                     " (reader supports " + std::to_string(kNspVersion) + "): " + path;
     return false;
   }
+  const uint32_t headerFlags = getU32(h + 8);
+  if (headerFlags != 0) {
+    if (err) *err = "package header flags nonzero (unsupported for v1): " + path;
+    return false;
+  }
   const uint32_t fileCount = getU32(h + 12);
   if (fileCount > kMaxFileCount) {
     if (err) *err = "package file count out of range: " + path;
@@ -254,17 +266,37 @@ bool PackageReader::open(const std::string& path, std::string* err) {
   const uint64_t manifestOffset = getU64(h + 16);
   const uint64_t manifestSize = getU64(h + 24);
   const uint64_t dataOffset = getU64(h + 32);
+  const uint64_t reserved = getU64(h + 40);
+  if (reserved != 0) {
+    if (err) *err = "package reserved field nonzero: " + path;
+    return false;
+  }
 
   if (manifestOffset != kNspHeaderSize) {
     if (err) *err = "package manifest offset invalid: " + path;
     return false;
   }
-  if (manifestOffset + manifestSize > fileSize) {
+  // overflow-safe: manifestOffset + manifestSize must not wrap and must fit
+  if (manifestOffset > fileSize_ || manifestSize > fileSize_ - manifestOffset) {
     if (err) *err = "package manifest exceeds file size (truncated?): " + path;
     return false;
   }
-  if (dataOffset < manifestOffset + manifestSize || dataOffset > fileSize) {
+  const uint64_t manifestEnd = manifestOffset + manifestSize;
+  if (dataOffset < manifestEnd || dataOffset > fileSize_) {
     if (err) *err = "package data offset invalid (truncated?): " + path;
+    return false;
+  }
+  if ((dataOffset & 7) != 0) {
+    if (err) *err = "package data offset not 8-aligned: " + path;
+    return false;
+  }
+
+  // read only the manifest region (header + manifest stay in RAM)
+  std::vector<uint8_t> manifest((size_t)manifestSize);
+  f.seekg((std::streamoff)manifestOffset, std::ios::beg);
+  f.read((char*)manifest.data(), (std::streamsize)manifestSize);
+  if (f.gcount() != (std::streamsize)manifestSize) {
+    if (err) *err = "package manifest unreadable (truncated?): " + path;
     return false;
   }
 
@@ -272,41 +304,49 @@ bool PackageReader::open(const std::string& path, std::string* err) {
   uint64_t pos = manifestOffset;
   std::map<std::string, Entry> parsed;
   for (uint32_t i = 0; i < fileCount; i++) {
-    if (pos + 4 > manifestOffset + manifestSize) {
+    // overflow-safe in-manifest bounds
+    if (pos >= manifestEnd || 4 > manifestEnd - pos) {
       if (err) *err = "package manifest truncated: " + path;
       return false;
     }
-    const uint32_t nameLen = getU32(raw.data() + pos);
+    const uint32_t nameLen = getU32(manifest.data() + (pos - manifestOffset));
     pos += 4;
     if (nameLen == 0 || nameLen > kMaxNameLen) {
       if (err) *err = "package entry name length invalid: " + path;
       return false;
     }
-    if (pos + nameLen > manifestOffset + manifestSize) {
+    if (pos >= manifestEnd || nameLen > manifestEnd - pos) {
       if (err) *err = "package entry name truncated: " + path;
       return false;
     }
-    const std::string name((const char*)raw.data() + pos, nameLen);
+    const std::string name((const char*)manifest.data() + (pos - manifestOffset),
+                           nameLen);
     pos += nameLen;
     if (normalizeVirtualPath(name) != name) {
       if (err) *err = "package entry has an unsafe virtual path: '" + name + "'";
       return false;
     }
     pos = (pos + 7) & ~7ull;
-    if (pos + 40 > manifestOffset + manifestSize) {
+    if (pos >= manifestEnd || 40 > manifestEnd - pos) {
       if (err) *err = "package manifest entry truncated: " + path;
       return false;
     }
-    const uint8_t* e = raw.data() + pos;
+    const uint8_t* e = manifest.data() + (pos - manifestOffset);
     Entry en;
     en.name = name;
     en.offset = getU64(e);
     en.packedSize = getU64(e + 8);
     en.size = getU64(e + 16);
     en.method = getU32(e + 24);
+    const uint32_t entryFlags = getU32(e + 28);
     en.hash = getU64(e + 32);
     pos += 40;
 
+    if (entryFlags != 0) {
+      if (err) *err = "package entry flags nonzero (unsupported for v1): '" +
+                      name + "'";
+      return false;
+    }
     if (en.method != kNspMethodStore) {
       if (err) *err = "package uses unsupported compression method " +
                       std::to_string(en.method) + " for '" + name + "'";
@@ -321,7 +361,9 @@ bool PackageReader::open(const std::string& path, std::string* err) {
       if (err) *err = "package entry too large: '" + name + "'";
       return false;
     }
-    if (en.offset < dataOffset || en.offset + en.packedSize > fileSize) {
+    // overflow-safe: en.offset + en.packedSize must fit inside the file
+    if (en.offset < dataOffset || en.offset > fileSize_ ||
+        en.packedSize > fileSize_ - en.offset) {
       if (err) *err = "package entry offset out of range (truncated?): '" + name + "'";
       return false;
     }
@@ -330,12 +372,51 @@ bool PackageReader::open(const std::string& path, std::string* err) {
       return false;
     }
   }
-  if (pos != manifestOffset + manifestSize) {
+  if (pos != manifestEnd) {
     if (err) *err = "package manifest size mismatch (trailing data): " + path;
     return false;
   }
 
-  raw_ = std::move(raw);
+  // reject overlapping payload ranges (defense in depth - the writer never
+  // emits them, so any overlap means a hand-crafted or corrupted package)
+  {
+    std::vector<const Entry*> byOff;
+    byOff.reserve(parsed.size());
+    for (const auto& kv : parsed) byOff.push_back(&kv.second);
+    std::sort(byOff.begin(), byOff.end(),
+              [](const Entry* a, const Entry* b) { return a->offset < b->offset; });
+    for (size_t i = 1; i < byOff.size(); i++) {
+      const Entry* prev = byOff[i - 1];
+      const Entry* cur = byOff[i];
+      if (prev->offset + prev->packedSize > cur->offset) {
+        if (err)
+          *err = "package entries overlap: '" + prev->name + "' and '" + cur->name + "'";
+        return false;
+      }
+    }
+  }
+
+  // directory index: parent vdir -> direct children (full virtual paths).
+  // Every path segment of every file becomes a child of its parent, so
+  // list("") yields top-level dirs + bare files, and list("data/sub")
+  // yields "data/sub/deep.txt" - O(children) instead of an O(all) scan.
+  for (const auto& kv : parsed) {
+    const std::string& p = kv.first;
+    size_t start = 0;
+    std::string parent;
+    while (true) {
+      const size_t slash = p.find('/', start);
+      if (slash == std::string::npos) {
+        dirs_[parent].insert(p);
+        break;
+      }
+      const std::string child = p.substr(0, slash);
+      dirs_[parent].insert(child);
+      parent = child;
+      start = slash + 1;
+    }
+  }
+
   entries_ = std::move(parsed);
   path_ = path;
   return true;
@@ -365,12 +446,26 @@ std::vector<uint8_t> PackageReader::read(const std::string& vpath) const {
     return {};
   }
   const Entry& e = it->second;
-  if (e.offset + e.packedSize > raw_.size() || e.packedSize != e.size) {
+  // overflow-safe bounds (open() validated these, but the file may have
+  // changed on disk since - re-validate against the size captured at open)
+  if (e.offset > fileSize_ || e.packedSize > fileSize_ - e.offset) {
     lastError_ = "package entry out of range (truncated?): " + n;
     return {};
   }
-  std::vector<uint8_t> out(raw_.begin() + (ptrdiff_t)e.offset,
-                           raw_.begin() + (ptrdiff_t)(e.offset + e.size));
+  std::ifstream f(path_, std::ios::binary);
+  if (!f) {
+    lastError_ = "cannot reopen package: " + path_;
+    return {};
+  }
+  std::vector<uint8_t> out((size_t)e.packedSize);
+  if (!out.empty()) {
+    f.seekg((std::streamoff)e.offset, std::ios::beg);
+    f.read((char*)out.data(), (std::streamsize)out.size());
+  }
+  if (f.gcount() != (std::streamsize)out.size()) {
+    lastError_ = "package entry short read (truncated?): " + n;
+    return {};
+  }
   if (fnv1a64(out) != e.hash) {
     lastError_ = "checksum mismatch (corrupt data): " + n;
     out.clear();
@@ -391,14 +486,43 @@ std::vector<std::string> PackageReader::fileList() const {
   return out;
 }
 
+bool PackageReader::isDirectory(const std::string& vdir) const {
+  const std::string n = normalizeVirtualPath(vdir);
+  return !n.empty() && dirs_.count(n) != 0;
+}
+
+std::vector<std::string> PackageReader::listDirectory(const std::string& vdir) const {
+  std::vector<std::string> out;
+  const std::string n = normalizeVirtualPath(vdir);
+  const auto it = dirs_.find(n);
+  if (it == dirs_.end()) return out;
+  out.reserve(it->second.size());
+  for (const auto& child : it->second) out.push_back(child);
+  return out;
+}
+
 bool PackageReader::verifyAll(std::string* err) const {
+  std::ifstream f(path_, std::ios::binary);
+  if (!f) {
+    if (err) *err = "cannot reopen package: " + path_;
+    return false;
+  }
   for (const auto& kv : entries_) {
     const Entry& e = kv.second;
-    if (e.offset + e.packedSize > raw_.size()) {
+    if (e.offset > fileSize_ || e.packedSize > fileSize_ - e.offset) {
       if (err) *err = "package entry out of range: " + e.name;
       return false;
     }
-    const uint64_t h = fnv1a64(raw_.data() + e.offset, (size_t)e.size);
+    std::vector<uint8_t> buf((size_t)e.packedSize);
+    if (!buf.empty()) {
+      f.seekg((std::streamoff)e.offset, std::ios::beg);
+      f.read((char*)buf.data(), (std::streamsize)buf.size());
+      if (f.gcount() != (std::streamsize)buf.size()) {
+        if (err) *err = "package entry short read: " + e.name;
+        return false;
+      }
+    }
+    const uint64_t h = fnv1a64(buf);
     if (h != e.hash) {
       if (err) *err = "checksum mismatch: " + e.name;
       return false;

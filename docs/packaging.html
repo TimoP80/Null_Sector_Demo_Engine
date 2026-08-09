@@ -168,6 +168,7 @@ src/main.cpp            --pack / --play / --root / --output parsing and the
                         one-time VFS selection near startup</pre>
         </div>
         <p>Development/editor operations that must touch real files — saving, creating, watching, modifying production data — keep direct filesystem access; the VFS is the runtime <em>read</em> path. Hot reload and the editor are unchanged and remain dev-tree based.</p>
+        <p><strong>Trust boundary:</strong> the VFS rejects unsafe <em>virtual</em> paths (traversal, absolute, drive letters), but <code>DirectoryFileSystem</code> then resolves onto the real filesystem and trusts the mounted development tree itself. A symlink or junction placed inside a mount resolves to wherever it points — that is dev-tooling behavior, not a security sandbox. The same boundary applies to the packer: only package trees you already trust.</p>
       </section>
 
       <section id="tests">

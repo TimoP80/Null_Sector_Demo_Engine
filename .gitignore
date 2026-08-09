@@ -23,3 +23,6 @@ imgui.ini
 perf*.json
 *.log
 .printcheck$pg.pdf
+
+# --- Packaged productions (generated) ---
+*.nsp

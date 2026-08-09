@@ -1511,6 +1511,33 @@ static void testDirectoryFS() {
 
 
 // ---------------------------------------------------------------------------
+// testFNV - known-vector regression for the FNV-1a 64 content hash (the .nsp
+// integrity checksum). The offset basis is the canonical 14695981039346656037
+// (0xcbf29ce484222325); the vectors below are the reference values from
+// isthe.com/chongo/tech/comp/fnv.
+// ---------------------------------------------------------------------------
+static void testFNV() {
+  CHECK(fnv1a64(nullptr, 0) == 14695981039346656037ull, "fnv: empty = offset basis");
+  CHECK(fnv1a64(std::vector<uint8_t>()) == 14695981039346656037ull,
+        "fnv: empty vector = offset basis (overload agrees)");
+
+  auto H = [](const char* s) -> uint64_t {
+    return fnv1a64((const uint8_t*)s, std::strlen(s));
+  };
+  CHECK(H("a") == 0xaf63dc4c8601ec8cull, "fnv: 'a'");
+  CHECK(H("foobar") == 0x85944171f73967e8ull, "fnv: 'foobar'");
+  CHECK(H("hello") == 0xa430d84680aabd0bull, "fnv: 'hello'");
+  CHECK(H("chongo was here!") == 0x858e2fa32a55e61dull, "fnv: 'chongo was here!'");
+  // 17 bytes incl. the trailing NUL (strlen cannot be used for this one)
+  {
+    static const uint8_t nulTerm[17] = {
+      0x63, 0x68, 0x6f, 0x6e, 0x67, 0x6f, 0x20, 0x77, 0x61,
+      0x73, 0x20, 0x68, 0x65, 0x72, 0x65, 0x21, 0x00};
+    CHECK(fnv1a64(nulTerm, 17) == 0x46810f40eff60347ull, "fnv: embedded NUL");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // testPackageFormat - write/read round trip + defensive validation.
 // ---------------------------------------------------------------------------
 static void testPackageFormat() {
@@ -1657,6 +1684,125 @@ static void testPackageFormat() {
     CHECK(!r.open(p, &err), "pkg: out-of-range data offset rejected");
   }
 
+  // overflow-safe checks: a manifestSize near 2^64 used to wrap in the old
+  // manifestOffset + manifestSize addition - now rejected, not wrapped
+  {
+    const std::string p = copyPkg(dir + "/wrap_manifest.nsp");
+    {
+      std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+      f.seekp(24);  // manifestSize u64
+      const uint64_t huge = 0xFFFFFFFFFFFFFF00ull;
+      f.write((const char*)&huge, 8);
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(!r.open(p, &err), "pkg: overflowing manifestSize rejected");
+    CHECK(err.find("manifest") != std::string::npos, "pkg: overflow names manifest");
+  }
+
+  // overflow-safe checks: an entry offset near 2^64 used to wrap in the old
+  // en.offset + en.packedSize addition - now rejected, not wrapped
+  {
+    const std::string p = copyPkg(dir + "/wrap_entry.nsp");
+    {
+      std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+      // first manifest entry (".ns-production" sorts first): its offset u64
+      // sits at 48 + 4 + nameLen(15) padded to an 8-byte boundary
+      const uint64_t offField = 48 + 4 + 15;
+      const uint64_t padded = (offField + 7) & ~7ull;
+      f.seekp((std::streamoff)padded);
+      const uint64_t huge = 0xFFFFFFFFFFFFFF00ull;
+      f.write((const char*)&huge, 8);
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(!r.open(p, &err), "pkg: overflowing entry offset rejected");
+    CHECK(err.find("offset") != std::string::npos, "pkg: overflow names offset");
+  }
+
+  // header flags must be zero for v1
+  {
+    const std::string p = copyPkg(dir + "/bad_flags.nsp");
+    {
+      std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+      f.seekp(8);  // header flags u32
+      const uint32_t flags = 1;
+      f.write((const char*)&flags, 4);
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(!r.open(p, &err), "pkg: nonzero header flags rejected");
+    CHECK(err.find("flags") != std::string::npos, "pkg: flags message");
+  }
+
+  // reserved field must be zero
+  {
+    const std::string p = copyPkg(dir + "/bad_reserved.nsp");
+    {
+      std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+      f.seekp(40);  // reserved u64
+      const uint64_t reserved = 1;
+      f.write((const char*)&reserved, 8);
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(!r.open(p, &err), "pkg: nonzero reserved field rejected");
+  }
+
+  // dataOffset must be 8-aligned
+  {
+    const std::string p = copyPkg(dir + "/bad_align.nsp");
+    {
+      std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+      f.seekp(32);  // dataOffset u64
+      uint64_t d = 0;
+      f.read((char*)&d, 8);
+      f.seekp(32);
+      const uint64_t mis = d | 1;  // unalign the (aligned) writer's value
+      f.write((const char*)&mis, 8);
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(!r.open(p, &err), "pkg: misaligned dataOffset rejected");
+  }
+
+  // overlapping payload ranges are rejected (hand-crafted corruption):
+  // walk the manifest and make the SECOND entry point at the FIRST entry's
+  // payload, so their ranges [off, off+size) intersect
+  {
+    const std::string p = copyPkg(dir + "/overlap.nsp");
+    {
+      std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+      uint64_t pos = 48;  // manifestOffset
+      uint64_t firstOff = 0, firstSize = 0;
+      bool first = true;
+      for (int i = 0; i < 2; i++) {
+        uint32_t nl = 0;
+        f.seekg((std::streamoff)pos);
+        f.read((char*)&nl, 4);
+        f.seekg(nl, std::ios::cur);
+        pos = (pos + 4 + nl + 7) & ~7ull;
+        if (first) {
+          f.seekg((std::streamoff)pos);
+          f.read((char*)&firstOff, 8);
+          f.seekg((std::streamoff)(pos + 8));
+          f.read((char*)&firstSize, 8);
+          first = false;
+        } else {
+          f.seekp((std::streamoff)pos);  // overwrite the second offset
+          f.write((const char*)&firstOff, 8);
+        }
+        pos += 40;
+      }
+      // sanity: the first entry actually has a payload (not an empty file)
+      CHECK(firstSize > 0, "pkg: overlap first entry non-empty");
+    }
+    PackageReader r;
+    std::string err;
+    CHECK(!r.open(p, &err), "pkg: overlapping entries rejected");
+    CHECK(err.find("overlap") != std::string::npos, "pkg: overlap message");
+  }
+
   std::filesystem::remove_all(dir, ec);
 }
 
@@ -1705,6 +1851,14 @@ static void testPackageFS() {
   CHECK(std::find(kids.begin(), kids.end(), "data/sub") != kids.end(), "pfs: list dir");
   const std::vector<std::string> sub = fs.list("data/sub");
   CHECK(sub.size() == 1 && sub[0] == "data/sub/deep.txt", "pfs: list nested");
+
+  // directory index: root lists top-level dirs + bare files; nested dirs exist
+  const std::vector<std::string> root = fs.list("");
+  CHECK(std::find(root.begin(), root.end(), "data") != root.end(), "pfs: root has data");
+  CHECK(std::find(root.begin(), root.end(), "shaders") != root.end(), "pfs: root has shaders");
+  CHECK(fs.stat("data/sub").exists && fs.stat("data/sub").isDir, "pfs: nested dir exists");
+  CHECK(!fs.stat("data/nope").exists, "pfs: missing dir absent");
+  CHECK(fs.list("data/nope").empty(), "pfs: missing dir lists empty");
 
   CHECK(!fs.exists("../x"), "pfs: traversal rejected");
   CHECK(fs.read("../x").empty(), "pfs: traversal read empty");
@@ -1803,6 +1957,7 @@ static void runAll() {
   ns::testDemoData();
   ns::testVirtualPath();
   ns::testDirectoryFS();
+  ns::testFNV();
   ns::testPackageFormat();
   ns::testPackageFS();
   ns::testDevPackageEquivalence();
