@@ -81,6 +81,7 @@
 #include "framework/vfs/nspack.hpp"
 #include "framework/vfs/packagefs.hpp"
 #include "framework/vfs/vfs.hpp"
+#include "framework/core/ffmpegpipe.hpp"
 
 #include <array>
 #include <chrono>
@@ -90,6 +91,8 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace ns {}  // keep everything in the global TU scope below
 
@@ -100,6 +103,16 @@ using namespace ns;
 // ---------------------------------------------------------------------------
 static double wallNow() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+
+// read the presented default-framebuffer frame (RGB, bottom-up) and push
+// it to ffmpeg stdin (the --export-mp4 capture path)
+static void writeExportFrame(FILE* pipe, int fbW, int fbH) {
+  std::vector<unsigned char> px((size_t)fbW * fbH * 3);
+  ::glReadPixels(0, 0, fbW, fbH, ::gl::RGB, ::gl::UNSIGNED_BYTE, px.data());
+  flipRowsInPlace(px.data(), fbW, fbH);  // GL rows are bottom-up; rawvideo is top-down
+  std::fwrite(px.data(), 1, px.size(), pipe);
 }
 
 /** find a playable track through the runtime VFS: well-known names first,
@@ -219,6 +232,10 @@ int main(int argc, char** argv) {
   int winW = 1600, winH = 900;
   float perfSeconds = 0;    // --perf-json/--perf-csv/--perf-raw runs: auto-exit after N s
   float editorSeconds = 0;  // --editor-seconds=N: auto-close the editor after N s (CI)
+  std::string exportMp4;       // --export-mp4=OUT.mp4: render the show once to an H.264 MP4
+  std::string exportAudioPath;  // resolved boot track, muxed into the MP4 by ffmpeg
+  float exportFps = 60.0f;     // --export-fps=N: capture rate (default 60)
+  float exportSeconds = 0;     // --export-seconds=N: stop the export after N s (previews/CI)
 
   for (int i = 1; i < argc; i++) {
     const std::string a = argv[i];
@@ -254,6 +271,9 @@ int main(int argc, char** argv) {
     else if (a.rfind("--perf-raw=", 0) == 0) perfRawPath = a.substr(11);
     else if (a.rfind("--perf-seconds=", 0) == 0) perfSeconds = (float)std::atof(a.c_str() + 15);
     else if (a == "--shot-noseek") shotNoSeek = true;
+    else if (a.rfind("--export-mp4=", 0) == 0) exportMp4 = a.substr(13);
+    else if (a.rfind("--export-fps=", 0) == 0) exportFps = (float)std::atof(a.c_str() + 13);
+    else if (a.rfind("--export-seconds=", 0) == 0) exportSeconds = (float)std::atof(a.c_str() + 17);
     else if (a.rfind("--shot=", 0) == 0) {
       const std::string v = a.substr(7);
       const size_t c = v.find(':');
@@ -264,31 +284,36 @@ int main(int argc, char** argv) {
     } else if (a == "--editor") editorMode = true;
     else if (a.rfind("--editor-seconds=", 0) == 0) editorSeconds = (float)std::atof(a.c_str() + 17);
     else if (a == "--help" || a == "-h") {
-      std::printf("NULL SECTOR // GHOST IN THE MACHINE (data-driven)\\n"
-                  "  --check-production[=PATH]  headless production validation (no GL): parse\\n"
-                  "                  the .nsd + verify every scene/effect/asset/rig reference\\n"
-                  "                  resolves (default: data/demo.nsd), then exit 0/1\\n"
-                  "  --check-shaders  compile every engine + app shader stage, then exit\\n"
-                  "  --check-models   headless-ish 3D pipeline preflight, then exit\\n"
-                  "  --check-hotreload  live-reload smoke (break+fix a temp shader), then exit\\n"
-                  "  --check-shadertoy  render data/shadertoy/*.glsl offscreen + readback, then exit\\n"
-                  "  --smoke-audio    headless track decode + analyser self-test\\n"
-                  "  --demo=PATH      demo script (default: data/demo.nsd)\\n"
-                  "  --plugin=DIR     effect plugin directory (default: data/plugins)\\n"
-                  "  --track=F1,F2,..  play F1 at boot; T / Shift+T cycles the comma list\\n"
-                  "                  (entries can't contain commas; default: scan cwd/assets/data)\\n"
-                  "  --no-track       run with no music file (silent)\\n"
-                  "  --font=FILE      TrueType font for text (default: assets/fonts/*.ttf)\\n"
-                  "  --perf-json[=PATH]  write per-effect GPU samples (default perf.json) at exit\\n"
-                  "  --perf-csv[=PATH]   append per-second GPU-time rows (default perf.csv)\\n"
-                  "  --perf-raw[=PATH]   append every collected raw sample (default perf.raw.csv)\\n"
-                  "  --perf-seconds=N    auto-exit after N s + dump (scripted A/B runs)\\n"
-                  "  --editor         dockable demo editor (ImGui) - live preview + timeline\\n"
-                  "  --editor-seconds=N  with --editor: auto-close after N s (CI smoke)\\n"
-                  "  --windowed       start in a window (default is fullscreen)\\n"
-                  "  --fullscreen     start in fullscreen (default)\\n"
+      std::printf("NULL SECTOR // GHOST IN THE MACHINE (data-driven)\n"
+                  "  --check-production[=PATH]  headless production validation (no GL): parse\n"
+                  "                  the .nsd + verify every scene/effect/asset/rig reference\n"
+                  "                  resolves (default: data/demo.nsd), then exit 0/1\n"
+                  "  --check-shaders  compile every engine + app shader stage, then exit\n"
+                  "  --check-models   headless-ish 3D pipeline preflight, then exit\n"
+                  "  --check-hotreload  live-reload smoke (break+fix a temp shader), then exit\n"
+                  "  --check-shadertoy  render data/shadertoy/*.glsl offscreen + readback, then exit\n"
+                  "  --smoke-audio    headless track decode + analyser self-test\n"
+                  "  --demo=PATH      demo script (default: data/demo.nsd)\n"
+                  "  --plugin=DIR     effect plugin directory (default: data/plugins)\n"
+                  "  --track=F1,F2,..  play F1 at boot; T / Shift+T cycles the comma list\n"
+                  "                  (entries can't contain commas; default: scan cwd/assets/data)\n"
+                  "  --no-track       run with no music file (silent)\n"
+                  "  --font=FILE      TrueType font for text (default: assets/fonts/*.ttf)\n"
+                  "  --perf-json[=PATH]  write per-effect GPU samples (default perf.json) at exit\n"
+                  "  --perf-csv[=PATH]   append per-second GPU-time rows (default perf.csv)\n"
+                  "  --perf-raw[=PATH]   append every collected raw sample (default perf.raw.csv)\n"
+                  "  --perf-seconds=N    auto-exit after N s + dump (scripted A/B runs)\n"
+                  "  --editor         dockable demo editor (ImGui) - live preview + timeline\n"
+                  "  --editor-seconds=N  with --editor: auto-close after N s (CI smoke)\n"
+                  "  --windowed       start in a window (default is fullscreen)\n"
+                  "  --fullscreen     start in fullscreen (default)\n"
                   "  --shot=SEC:FILE.bmp  seek to SEC, save one presented frame, exit\n" \
-                  "  --window=WxH     window size when windowed (default 1600x900)\\n");
+                  "  --export-mp4=FILE  render the show once to an H.264 MP4 (real-time,\n"
+                  "                  music-synced; ffmpeg must be on PATH; muxes the\n"
+                  "                  playing track; --window=WxH sets the resolution)\n"
+                  "  --export-fps=N    export capture rate (default 60)\n"
+                  "  --export-seconds=N  stop the export after N s (previews / CI)\n"
+                  "  --window=WxH     window size when windowed (default 1600x900)\n");
       return 0;
     }
   }
@@ -304,6 +329,16 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[MAIN] --editor ignores --perf-json/--perf-csv/--perf-raw "
                          "(the editor has its own Profiler panel)\n");
   }
+  if (!exportMp4.empty() && editorMode) {
+    std::fprintf(stderr, "[MAIN] --export-mp4 conflicts with --editor (export renders the show once)\n");
+    return 1;
+  }
+  if (!exportMp4.empty() && shotSeconds >= 0.0f) {
+    std::fprintf(stderr, "[MAIN] --export-mp4 conflicts with --shot (export captures the whole show)\n");
+    return 1;
+  }
+  if (exportFps < 1.0f) exportFps = 1.0f;
+  if (exportFps > 240.0f) exportFps = 240.0f;
 
   // the editor is a tool, not the show: windowed by default, a sensible size
   if (editorMode) {
@@ -376,10 +411,10 @@ int main(int argc, char** argv) {
                               nullptr, nullptr);
   if (!g_window) { std::fprintf(stderr, "[MAIN] window creation failed\n"); glfwTerminate(); return 1; }
   glfwMakeContextCurrent(g_window);
-  glfwSwapInterval(1);
+  glfwSwapInterval(exportMp4.empty() ? 1 : 0);  // export paces itself
   // the smoke modes run headless-ish: keep them in a window (some CI boxes
   // have no real display mode to enter)
-  if (fullscreen && !checkHotReload && !checkShadertoy) toggleFullscreen();
+  if (fullscreen && exportMp4.empty() && !checkHotReload && !checkShadertoy) toggleFullscreen();
   if (!glLoadFunctions()) { std::fprintf(stderr, "[MAIN] GL function load failed\n"); return 1; }
 
   int fbW = 0, fbH = 0;
@@ -480,6 +515,7 @@ int main(int argc, char** argv) {
     const std::string track = cliTracks.empty() ? findTrack(prodScript) : cliTracks[0];
     if (!track.empty()) {
       audio.loadTrack(track);
+      exportAudioPath = track;  // ffmpeg muxes the same audio the show reacts to
     } else {
       std::fprintf(stderr, "[MAIN] no WAV/MP3 track found - the show will run silent (no built-in synth)\n");
     }
@@ -616,6 +652,48 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  // --- MP4 export: pipe every presented frame (RGB24) into ffmpeg -----------
+  FILE* exportPipe = nullptr;
+  size_t exportFrames = 0;
+  double exportNextT = 0;
+  double exportLastWall = 0;
+  if (!exportMp4.empty()) {
+    // a package-internal track has no real path on disk: export the video
+    // without audio rather than letting ffmpeg fail the whole render
+    if (!exportAudioPath.empty() && !std::filesystem::exists(exportAudioPath)) {
+      std::fprintf(stderr, "[EXPORT] track '%s' is not a real file (inside a package?) - exporting video only\n",
+                   exportAudioPath.c_str());
+      exportAudioPath.clear();
+    }
+    {  // availability probe: fail early with a clear message, not mid-export
+      FILE* probe = openPipe("ffmpeg -hide_banner -version", "r");
+      if (!probe) {
+        std::fprintf(stderr, "[EXPORT] ffmpeg not found on PATH - install it (or add its folder to PATH)\n");
+        glfwDestroyWindow(g_window);
+        glfwTerminate();
+        return 1;
+      }
+      char probeBuf[128];
+      (void)std::fread(probeBuf, 1, sizeof(probeBuf), probe);
+      closePipe(probe);
+    }
+    const std::string cmd = buildFfmpegCaptureCmd(
+        exportMp4, fbW > 0 ? fbW : winW, fbH > 0 ? fbH : winH, exportFps, exportAudioPath);
+    exportPipe = openPipe(cmd, "wb");
+    if (!exportPipe) {
+      std::fprintf(stderr, "[EXPORT] failed to start ffmpeg for %s\n", exportMp4.c_str());
+      glfwDestroyWindow(g_window);
+      glfwTerminate();
+      return 1;
+    }
+    exportLastWall = wallNow();
+    std::fprintf(stderr, "[EXPORT] capturing %dx%d @ %g fps -> %s%s\n",
+                 fbW > 0 ? fbW : winW, fbH > 0 ? fbH : winH, exportFps, exportMp4.c_str(),
+                 exportAudioPath.empty() ? " (no audio stream)"
+                                         : (" (muxing " + exportAudioPath + ")").c_str());
+  }
+
+
   // --- input state ----------------------------------------------------------------
   std::array<bool, 512> prevKeys{};
 
@@ -695,8 +773,21 @@ int main(int argc, char** argv) {
     director.advance(audio.now());
     timeline.advance(director.show);
 
-    // end of show: loop from 0:00 (the app re-arms its timeline on the jump)
-    if (director.show >= app.editor().duration - 0.01f && app.editor().duration > 0) {
+    // end of show: loop from 0:00 (the app re-arms its timeline on the jump),
+    // unless exporting - then the show runs exactly once and we stop after the
+    // final frame (the capture loop duplicates frames if the clock jumped ahead)
+    if (exportPipe) {
+      const float dur = app.editor().duration;
+      const float showEnd = (exportSeconds > 0.0f && exportSeconds < dur) ? exportSeconds : dur;
+      if (showEnd > 0 && director.show >= showEnd - 0.01f) {
+        while (exportNextT <= director.show + 1e-4) {
+          writeExportFrame(exportPipe, cw, ch);
+          exportFrames++;
+          exportNextT += 1.0 / exportFps;
+        }
+        glfwSetWindowShouldClose(g_window, 1);
+      }
+    } else if (director.show >= app.editor().duration - 0.01f && app.editor().duration > 0) {
       director.init(0);
       app.seek(0);
     }
@@ -876,11 +967,39 @@ int main(int argc, char** argv) {
       glfwSetWindowShouldClose(g_window, 1);
     }
 
+    // --export-mp4: pipe one presented frame per capture-rate boundary the
+    // show clock has crossed (a slow frame duplicates - never drops), then
+    // idle-pace to the next boundary (the show clock runs in real time)
+    if (exportPipe) {
+      while (exportNextT <= director.show) {
+        writeExportFrame(exportPipe, cw, ch);
+        exportFrames++;
+        exportNextT += 1.0 / exportFps;
+      }
+      if (exportFrames > 0 && exportFrames % (size_t)(exportFps * 5.0) == 0)
+        std::fprintf(stderr, "[EXPORT] %.1fs (%zu frames)\n", exportNextT, exportFrames);
+      exportLastWall += 1.0 / exportFps;
+      const double until = exportLastWall - wallNow();
+      if (until > 0.002)
+        std::this_thread::sleep_for(std::chrono::duration<double>(until));
+    }
+
+
     glfwSwapBuffers(g_window);
 
     const float frameMs = (float)((wallNow() - frameStart) * 1000.0);
     renderer.tick(frameMs, frameMs);
   }
+
+  // --export-mp4: close the pipe (flushes + waits for ffmpeg to finish) and
+  // report what was captured
+  if (exportPipe) {
+    const int rc = closePipe(exportPipe);
+    std::fprintf(stderr, "[EXPORT] done: %zu frames @ %.0f fps = %.2fs -> %s (ffmpeg rc=%d)\n",
+                 exportFrames, exportFps, (double)exportFrames / exportFps,
+                 exportMp4.c_str(), rc);
+  }
+
 
   // --perf-json: one GPU-time sample per effect + the post stack, written at
   // exit while the effects/PostFX still exist (reads stats only - no GL)

@@ -183,18 +183,24 @@ void main() {
 
   // --- background -------------------------------------------------------------
   vec3 col = vec3(0.004, 0.002, 0.012);
-  // ambient distant-node glow (single pass, miss path only)
+  // ambient distant-node glow - MISS PATH ONLY (as the comment always said):
+  // hit pixels have the node/synapse/core shading + fresnel + fog, and every
+  // hit pixel was paying 56 exp()+sqrt() for a halo it can't even see. Gating
+  // it behind the miss keeps the fly-through (where every pixel hits the core
+  // wall) at 60fps instead of spiking to ~45ms.
   float glowAcc = 0.0;
-  for (int i = 0; i < N; i++) {
-    vec3 dv = nodes[i] - ro;
-    float d2 = dot(dv, dv);
-    if (d2 > 16.0) {
-      float dist = sqrt(d2);
-      // glow falloff exp(-0.22*d) ~ 1e-3 already at d=30 and the ang^2 term
-      // is <=1: skipping the transcendental for far nodes is invisible
-      if (dist > 30.0) continue;
-      float ang = max(dot(rd, dv / dist), 0.0);
-      glowAcc += ang * ang * exp(-dist * 0.22) * 0.14;
+  if (hit < 0.5 && marchable) {
+    for (int i = 0; i < N; i++) {
+      vec3 dv = nodes[i] - ro;
+      float d2 = dot(dv, dv);
+      if (d2 > 16.0) {
+        float dist = sqrt(d2);
+        // glow falloff exp(-0.22*d) ~ 1e-3 already at d=30 and the ang^2 term
+        // is <=1: skipping the transcendental for far nodes is invisible
+        if (dist > 30.0) continue;
+        float ang = max(dot(rd, dv / dist), 0.0);
+        glowAcc += ang * ang * exp(-dist * 0.22) * 0.14;
+      }
     }
   }
   col += palVoid(musicHue(0.1)) * glowAcc * (0.5 + 0.5 * pulse);

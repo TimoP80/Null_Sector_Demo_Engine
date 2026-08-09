@@ -7,12 +7,15 @@
 #include "framework/camera/camerarig.hpp"
 #include "framework/core/json.hpp"
 #include "framework/core/log.hpp"
+#include "framework/core/ffmpegpipe.hpp"
 #include "framework/core/value.hpp"
 #include "framework/resources/assetmanager.hpp"
 #include "framework/resources/filewatcher.hpp"
 #include "framework/scene/scenegraph.hpp"
 #include "framework/script/scriptengine.hpp"
 #include "framework/script/scriptparser.hpp"
+#include "framework/script/nsdwriter.hpp"
+#include "editor/document.hpp"
 #include "framework/timeline/timelineeditor.hpp"
 #include "framework/vfs/directoryfs.hpp"
 #include "framework/vfs/nspack.hpp"
@@ -28,6 +31,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <thread>
 
 namespace ns {
@@ -178,6 +182,25 @@ at 66.667 s { marker "four" }
   float f[3];
   s3.main[0].cmds[0].opts.get("pos").toFloats(f, 3);
   CHECK(f[0] == 1.0f && f[1] == -2.0f && f[2] == 3.5f, "vector with negatives");
+
+  // image nodes accept both the explicit node+file form and the convenient
+  // one-argument form; transition options stay in the command AST for the
+  // runtime director to apply at scene activation.
+  {
+    const Script image = ScriptParser::parse(R"(
+scene Gallery {
+    image poster poster.png { pos (0,0,0); size (2,1,1); transition fade; duration 0.75 }
+    at 2 { image logo.png { transition zoom  } }
+}
+)", "image");
+    CHECK(image.scenes[0].setup.size() == 1, "image commands parse in scene setup");
+    CHECK(image.scenes[0].setup[0].name == "image", "image command name");
+    CHECK(image.scenes[0].setup[0].args[0].asStr() == "poster", "image node name arg");
+    CHECK(image.scenes[0].setup[0].args[1].asStr() == "poster.png", "image texture arg");
+    CHECK(image.scenes[0].setup[0].s("transition") == "fade", "image transition option");
+    CHECK_NEAR(image.scenes[0].setup[0].f("duration"), 0.75f, 1e-6f, "image transition duration");
+    CHECK(image.scenes[0].blocks[0].cmds[0].args[0].asStr() == "logo.png", "one-argument image form");
+  }
 
   // errors
   bool threw = false;
@@ -2030,6 +2053,271 @@ static void testDevPackageEquivalence() {
   std::filesystem::remove_all(dir, ec);
 }
 
+// ---------------------------------------------------------------------------
+// testNsdRoundTrip - the writer (nsdSerialize) must be the exact inverse of
+// the parser: parse -> serialize -> parse must be structurally identical, and
+// serialize must be idempotent (stable output).
+// ---------------------------------------------------------------------------
+namespace {
+bool valueEqual(const Value& a, const Value& b) {
+  if (a.type() != b.type()) return false;
+  switch (a.type()) {
+    case Value::Type::Null: return true;
+    case Value::Type::Bool: return a.asBool() == b.asBool();
+    case Value::Type::Num: return a.asNum() == b.asNum();
+    case Value::Type::Str: return a.asStr() == b.asStr();
+    case Value::Type::Arr: {
+      if (a.size() != b.size()) return false;
+      for (size_t i = 0; i < a.size(); i++)
+        if (!valueEqual(a.atIndex(i), b.atIndex(i))) return false;
+      return true;
+    }
+    case Value::Type::Obj: {
+      const auto& oa = a.asObj();
+      const auto& ob = b.asObj();
+      if (oa.size() != ob.size()) return false;
+      for (size_t i = 0; i < oa.size(); i++) {
+        if (oa[i].first != ob[i].first) return false;
+        if (!valueEqual(oa[i].second, ob[i].second)) return false;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+bool cmdEqual(const Cmd& a, const Cmd& b) {
+  if (a.name != b.name) return false;
+  if (a.args.size() != b.args.size()) return false;
+  for (size_t i = 0; i < a.args.size(); i++)
+    if (!valueEqual(a.args[i], b.args[i])) return false;
+  if (!valueEqual(a.opts, b.opts)) return false;
+  if (a.keys.size() != b.keys.size()) return false;
+  for (size_t i = 0; i < a.keys.size(); i++) {
+    if (a.keys[i].t != b.keys[i].t) return false;
+    if (a.keys[i].interp != b.keys[i].interp) return false;
+    if (!valueEqual(a.keys[i].v, b.keys[i].v)) return false;
+  }
+  return true;
+}
+bool blockEqual(const ScriptBlock& a, const ScriptBlock& b) {
+  if (a.time != b.time) return false;
+  if (a.cmds.size() != b.cmds.size()) return false;
+  for (size_t i = 0; i < a.cmds.size(); i++)
+    if (!cmdEqual(a.cmds[i], b.cmds[i])) return false;
+  return true;
+}
+bool scriptEqual(const Script& a, const Script& b) {
+  if (a.title != b.title || a.bpm != b.bpm || a.duration != b.duration) return false;
+  if (a.scenes.size() != b.scenes.size()) return false;
+  for (size_t i = 0; i < a.scenes.size(); i++) {
+    const SceneDef& x = a.scenes[i];
+    const SceneDef& y = b.scenes[i];
+    if (x.name != y.name || x.title != y.title || x.bars != y.bars ||
+        x.duration != y.duration || x.intensity != y.intensity ||
+        x.chapter != y.chapter || x.visible != y.visible) return false;
+    if (x.setup.size() != y.setup.size()) return false;
+    for (size_t k = 0; k < x.setup.size(); k++)
+      if (!cmdEqual(x.setup[k], y.setup[k])) return false;
+    if (x.blocks.size() != y.blocks.size()) return false;
+    for (size_t k = 0; k < x.blocks.size(); k++)
+      if (!blockEqual(x.blocks[k], y.blocks[k])) return false;
+  }
+  if (a.main.size() != b.main.size()) return false;
+  for (size_t i = 0; i < a.main.size(); i++)
+    if (!blockEqual(a.main[i], b.main[i])) return false;
+  return true;
+}
+}  // namespace
+
+static void testNsdRoundTrip() {
+  const std::string src =
+      "demo \"TEST SHOW\" {\n"
+      "    bpm 140\n"
+      "    duration 60\n"
+      "}\n"
+      "scene Intro {\n"
+      "    bars 8  intensity 0.3  chapter 0\n"
+      "    title \"Opening\"\n"
+      "    camera IntroCam { rig static; pos (0,0,2.4); fov 55 }\n"
+      "    show intro\n"
+      "    play music\n"
+      "    at 4 { anim introBloom post.bloom smooth { 0 1.2; 3 2.4; 6 1.5 } }\n"
+      "}\n"
+      "scene Nave {\n"
+      "    bars 4  intensity 0.55  chapter 1  visible false\n"
+      "    duration 12\n"
+      "    at 2 { marker INSIDE }\n"
+      "}\n"
+      "at 0 { show Intro; marker START }\n"
+      "at 1:05.5 { camera NaveCam { rig drift; pos (1,2,3) }; fade in 2 }\n"
+      "at 30 { anim camPos camera.pos cubic { 0 (0,0,4); 8 (2,0,4) linear; 16 (0,0,2) ease-in-out } }\n"
+      "at 45 { text \"HELLO WORLD\" { color (1,0.5,0.2,1); size 32 } }\n";
+  const Script a = ScriptParser::parse(src, "t");
+  CHECK(a.scenes.size() == 2, "roundtrip: 2 scenes parsed");
+  CHECK(a.main.size() == 4, "roundtrip: 4 main blocks parsed");
+  const std::string out1 = nsdSerialize(a);
+  const Script b = ScriptParser::parse(out1, "t1");
+  CHECK(scriptEqual(a, b), "roundtrip: parse(serialize(parse(x))) == parse(x)");
+  const std::string out2 = nsdSerialize(b);
+  CHECK(out1 == out2, "roundtrip: serialize is idempotent");
+  CHECK(nsdSerializeCmd(b.main[2].cmds[0]) ==
+            nsdSerializeCmd(a.main[2].cmds[0]),
+        "roundtrip: per-command serialization stable");
+
+  // the REAL productions must survive the round-trip too (guarded by file
+  // existence so CI without the data tree stays green)
+  const std::string dataDir = NULLSECTOR_DATA_DIR;
+  const char* prods[] = {"demo.nsd", "neural_dust.nsd", "example.nsd"};
+  for (const char* prod : prods) {
+    const std::string path = dataDir + "/" + prod;
+    if (!std::filesystem::exists(path)) continue;
+    const Script p1 = ScriptParser::parse(
+        [] (const std::string& f) {
+          std::ifstream in(f, std::ios::binary);
+          std::ostringstream ss;
+          ss << in.rdbuf();
+          return ss.str();
+        }(path), path);
+    const Script p2 = ScriptParser::parse(nsdSerialize(p1), path + ".s");
+    CHECK(scriptEqual(p1, p2), "roundtrip: production survives serialize");
+    CHECK(nsdSerialize(p1) == nsdSerialize(p2),
+          "roundtrip: production serialization is idempotent");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// testEditorDocument - the document model: marker ops, dirty state, undo.
+// ---------------------------------------------------------------------------
+static void testEditorDocument() {
+  EditorDocument d;
+  const std::string src =
+      "demo \"T\" {\n"
+      "    bpm 120\n"
+      "}\n"
+      "scene A {\n"
+      "    bars 4\n"
+      "    at 2 { marker INSIDE }\n"
+      "}\n"
+      "at 5 { show A }\n"
+      "at 10 { marker M2 }\n"
+      "at 12 { marker M3 }\n";
+  d.adopt(ScriptParser::parse(src, "t"), "data/_fw_test_doc.nsd");
+  CHECK(!d.dirty, "doc: fresh adopt is clean");
+  CHECK(!d.canUndo() && !d.canRedo(), "doc: fresh adopt has no undo/redo");
+
+  CHECK(d.findMarker("INSIDE") == nullptr, "doc: scene marker not in main");
+  CHECK(d.findMarker("M2") != nullptr && d.findMarker("M3") != nullptr,
+        "doc: main markers found");
+
+  // add (duplicate rejected)
+  d.beginEdit("add marker");
+  CHECK(d.addMarker("NEW", 11.0f), "doc: addMarker");
+  CHECK(!d.addMarker("NEW", 1.0f), "doc: duplicate marker rejected");
+  d.endEdit();
+  CHECK(d.dirty, "doc: edit marks dirty");
+  CHECK(d.findMarker("NEW") != nullptr && d.findMarker("NEW")->time == 11.0f,
+        "doc: new marker present at 11s");
+  CHECK(d.markerNames().size() == 3, "doc: 3 markers after add");
+  for (size_t i = 1; i < d.ast.main.size(); i++)
+    CHECK(d.ast.main[i - 1].time <= d.ast.main[i].time, "doc: main sorted");
+
+  // move a marker that SHARES its block (split it by adding another command)
+  d.ast.main[2].cmds.push_back(Cmd{"show", {}, Value::object(), {}});
+  d.beginEdit("move marker");
+  CHECK(d.moveMarker("M2", 20.0f), "doc: moveMarker");
+  d.endEdit();
+  ScriptBlock* b = d.findMarker("M2");
+  CHECK(b != nullptr && b->time == 20.0f, "doc: M2 moved to 20s");
+
+  // rename
+  d.beginEdit("rename marker");
+  CHECK(d.renameMarker("M3", "M3X"), "doc: renameMarker");
+  CHECK(!d.renameMarker("M3", "M3X"), "doc: rename of missing marker fails");
+  CHECK(!d.renameMarker("M3X", "NEW"), "doc: rename onto a taken name fails");
+  d.endEdit();
+  CHECK(d.findMarker("M3X") != nullptr && d.findMarker("M3") == nullptr,
+        "doc: renamed");
+
+  // remove
+  d.beginEdit("delete marker");
+  CHECK(d.removeMarker("M3X"), "doc: removeMarker");
+  d.endEdit();
+  CHECK(d.findMarker("M3X") == nullptr, "doc: M3X gone");
+
+  // undo: back to before the remove (M3X present again)
+  d.undo();
+  CHECK(d.findMarker("M3X") != nullptr, "doc: undo restores removed marker");
+  CHECK(d.dirty, "doc: undo keeps dirty (document changed since save)");
+  d.undo();
+  CHECK(d.findMarker("M3") != nullptr && d.findMarker("M3X") == nullptr,
+        "doc: undo restores the rename");
+  CHECK(d.canRedo(), "doc: redo available");
+  d.redo();
+  CHECK(d.findMarker("M3X") != nullptr, "doc: redo re-applies the rename");
+
+  // no-op gesture leaves no undo entry
+  d.beginEdit("move marker");
+  d.endEdit();  // nothing changed -> no entry
+  CHECK(d.canUndo(), "doc: no-op gesture did not consume undo");
+
+  // save clears dirty + the file round-trips
+  const std::string before = d.serialize();
+  d.dirty = true;
+  CHECK(d.save(), "doc: save writes the file");
+  CHECK(!d.dirty, "doc: save clears dirty");
+  const Script reparsed = ScriptParser::parse(before, "saved");
+  CHECK(scriptEqual(d.ast, reparsed), "doc: saved file re-parses to the doc");
+
+  std::remove("data/_fw_test_doc.nsd");
+}
+
+// testFlipRowsInPlace - glReadPixels returns rows bottom-up; rawvideo wants
+// top-down, so every exported frame is flipped. Verify the in-place swap.
+static void testFlipRowsInPlace() {
+  // 2x3 image: row 0 red, row 1 blue (each row = 3 px * 3 ch = 9 bytes)
+  unsigned char img[18];
+  for (int i = 0; i < 3; i++) { img[i * 3] = 255; img[i * 3 + 1] = 0; img[i * 3 + 2] = 0; }
+  for (int i = 0; i < 3; i++) { img[9 + i * 3] = 0; img[9 + i * 3 + 1] = 0; img[9 + i * 3 + 2] = 255; }
+  flipRowsInPlace(img, 3, 2);
+  CHECK(img[0] == 0 && img[2] == 255, "flip: old row 1 (blue) now on top");
+  CHECK(img[9] == 255 && img[11] == 0, "flip: old row 0 (red) now on bottom");
+
+  // odd height (3 rows) + width 1: middle row must stay put
+  unsigned char img2[9] = {1, 0, 0, 2, 0, 0, 3, 0, 0};  // rows 0,1,2
+  flipRowsInPlace(img2, 1, 3);
+  CHECK(img2[0] == 3 && img2[3] == 2 && img2[6] == 1, "flip: odd height swaps ends, center stays");
+
+  // degenerate: 1 row and empty sizes are no-ops (must not crash)
+  unsigned char img3[3] = {9, 9, 9};
+  flipRowsInPlace(img3, 1, 1);
+  CHECK(img3[0] == 9, "flip: single row unchanged");
+  flipRowsInPlace(img3, 0, 0);
+  CHECK(img3[0] == 9, "flip: zero size no-op");
+}
+
+// testFfmpegCaptureCmd - the shared ffmpeg command builder used by both
+// the CLI --export-mp4 path and the editor's File > Export MP4... action.
+static void testFfmpegCaptureCmd() {
+  const std::string c = buildFfmpegCaptureCmd("out.mp4", 640, 360, 60.0f, "");
+  CHECK(c.find("rawvideo") != std::string::npos, "ffmpeg rawvideo input");
+  CHECK(c.find("-pix_fmt rgb24") != std::string::npos, "ffmpeg rgb24 pixels");
+  CHECK(c.find("-s 640x360") != std::string::npos, "ffmpeg size");
+  CHECK(c.find("-r 60 ") != std::string::npos, "ffmpeg fps");
+  CHECK(c.find("libx264") != std::string::npos, "h264 encoder");
+  CHECK(c.find("-movflags +faststart") != std::string::npos, "faststart");
+  CHECK(c.find("\"out.mp4\"") != std::string::npos, "quoted output path");
+  CHECK(c.find("-i \"") == std::string::npos, "no audio input without a track");
+  CHECK(c.find("-shortest") == std::string::npos, "no -shortest without audio");
+
+  const std::string a =
+      buildFfmpegCaptureCmd("o u t.mp4", 1920, 1080, 59.94f, "data/track.wav");
+  CHECK(a.find("-i \"data/track.wav\"") != std::string::npos, "audio input");
+  CHECK(a.find("-c:a aac -b:a 192k") != std::string::npos, "aac audio encode");
+  CHECK(a.find("-shortest") != std::string::npos, "-shortest mux");
+  CHECK(a.find("\"o u t.mp4\"") != std::string::npos, "spaced path quoted");
+  CHECK(a.find("-r 59.94") != std::string::npos, "fractional fps");
+}
+
 }  // namespace ns
 
 static void runAll() {
@@ -2055,6 +2343,10 @@ static void runAll() {
   ns::testPackageCompression();
   ns::testPackageFS();
   ns::testDevPackageEquivalence();
+  ns::testNsdRoundTrip();
+  ns::testEditorDocument();
+  ns::testFfmpegCaptureCmd();
+  ns::testFlipRowsInPlace();
 }
 
 int main() {

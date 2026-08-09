@@ -31,7 +31,7 @@ scene Boot {
     bars 13  intensity 0.15  chapter 0
     title "Memory Recovery"
     camera BootCam { rig drift; pos (0,0,6); target (0,0,0); fov (50,58); amp 0.8; freq 0.11; handheld 0.02 }
-    show ndboot { renderScale 0.52 }
+    show ndboot { renderScale 0.45 }
     post preset nd_boot
     fade in 3
     at 23.5 { transition fade 1 }
@@ -46,7 +46,7 @@ scene Core {
     bars 16  intensity 0.55  chapter 1
     title "Memory Core"
     camera CoreCam { rig drift; pos (0,0,13); target (0,0,0); fov 58; amp 0.5; freq 0.09; handheld 0.02 }
-    show ndcore { renderScale 0.6 }
+    show ndcore { renderScale 0.5 }
     post preset nd_core
     at 1 { anim coreFly camera.pos cubic { 0 (0,1,13); 8 (0,0,7); 16 (0,0,0); 24 (0,0,-8); 29 (0,-1,-13) } }
     at 1 { anim coreFov camera.fov linear { 0 58; 16 64; 29 52 } }

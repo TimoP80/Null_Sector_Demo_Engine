@@ -6,6 +6,7 @@
 
 #include "framework/core/json.hpp"
 #include "framework/core/log.hpp"
+#include "framework/script/nsdwriter.hpp"
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -16,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cwchar>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +27,15 @@
 #include <sstream>
 #include <string>
 #include <thread>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#include <commdlg.h>
+#endif
 
 namespace ns {
 
@@ -217,13 +228,13 @@ static void putU16(std::vector<unsigned char>& b, uint16_t v) {
   b.push_back((unsigned char)(v & 0xff));
   b.push_back((unsigned char)((v >> 8) & 0xff));
 }
-static bool writeSmokeWav(const char* path) {
+static bool writeSmokeWav(const char* path, float seconds = 1.0f) {
   // 1.0 s with real kick transients: low-frequency pulses every 0.25 s (a
   // 120 BPM four-on-the-floor beat), so the beat-marker editor's kick
   // detector has several clean onsets to find. A quiet 440 Hz bed keeps the
   // windowed energy low between kicks.
   const uint32_t sr = 44100;
-  const uint32_t n = sr;  // 1.0 s
+  const uint32_t n = (uint32_t)(sr * seconds);  // 1.0 s at the default
   const uint32_t dataSize = n * 2;
   std::vector<unsigned char> b;
   const unsigned char riff[] = {'R', 'I', 'F', 'F'};
@@ -270,7 +281,19 @@ DemoEditor::DemoEditor(const Wiring& w) : w_(w) {
   smokeScene_ = std::getenv("NS_EDITOR_SCENE_SMOKE") != nullptr;
   smokeAsset_ = std::getenv("NS_EDITOR_ASSET_SMOKE") != nullptr;
   smokeScrub_ = std::getenv("NS_EDITOR_SCRUB_SMOKE") != nullptr;
-  smokeAudio_ = std::getenv("NS_EDITOR_AUDIO_SMOKE") != nullptr;
+  smokeAudio_ = std::getenv("NS_EDITOR_AUDIO_SMOKE") != nullptr;  smokeDoc_ = std::getenv("NS_EDITOR_DOC_SMOKE") != nullptr;
+  smokeExport_ = std::getenv("NS_EDITOR_EXPORT_SMOKE") != nullptr;
+  smokePackage_ = std::getenv("NS_EDITOR_PACKAGE_SMOKE") != nullptr;
+  if (smokePackage_) {
+    smokePackagePath_ = std::getenv("NS_EDITOR_PACKAGE_SMOKE");
+    if (smokePackagePath_.empty()) smokePackagePath_ = "package_smoke.zip";
+  }
+  if (smokeExport_) {
+    smokeExportPath_ = std::getenv("NS_EDITOR_EXPORT_SMOKE");
+    if (const char* s = std::getenv("NS_EDITOR_EXPORT_SECONDS"))
+      smokeExportSeconds_ = (float)std::atof(s);
+    if (smokeExportSeconds_ <= 0.0f) smokeExportSeconds_ = 3.0f;
+  }
   initImGui();
 
   // OS-level drag-in: files dropped from Explorer/file managers onto the
@@ -288,6 +311,7 @@ DemoEditor::DemoEditor(const Wiring& w) : w_(w) {
   // in the drop-history trail (no-op on a clean slate)
   markSessionResume();
 
+  initDocument();  // adopt the app's parsed script as the editor document
   Log::info("EDITOR", "Demo Editor ready (docking; layouts persist in imgui.ini)");
 }
 
@@ -469,6 +493,7 @@ bool DemoEditor::frame() {
   // OS drag-in: GLFW just delivered any Explorer drops - apply them against
   // last frame's viewport rect (the drop happened before this poll)
   drainOsDrops();
+  syncDocumentFromApp();  // external reload (watcher / F2 / switch) re-adopts the doc
 
   // resize propagation (window framebuffer -> renderer/post/camera/app)
   int fbW = 0, fbH = 0;
@@ -494,6 +519,22 @@ bool DemoEditor::frame() {
   // responsive - the device stop/start swap is a few ms, not the whole file)
   pumpAsyncAudioSwap();
 
+  // MP4 export smoke (NS_EDITOR_EXPORT_SMOKE=path): auto-start one export
+  // at boot so CI can prove the capture pipeline (a real track muxes with it)
+  if (smokeExport_ && !smokeExportStarted_) {
+    smokeExportStarted_ = true;
+    smokeAudioPath_ = "data/editor_export_smoke.wav";
+    writeSmokeWav(smokeAudioPath_.c_str(), smokeExportSeconds_ + 1.0f);
+    exportAudio_ = true;
+    startExport(smokeExportPath_, smokeAudioPath_);
+  }
+  if (smokePackage_ && !smokePackageStarted_) {
+    smokePackageStarted_ = true;
+    startPackage(smokePackagePath_);
+    std::fprintf(stderr, "[EDITOR-PACKAGE-SMOKE] %s: %s\n",
+                 packageOk_ ? "OK" : "FAIL", packageMessage_.c_str());
+  }
+
   // --- engine step (audio -> director -> timeline -> app) --------------------
   if (w_.audio) w_.audio->update();
   if (w_.director) {
@@ -514,7 +555,17 @@ bool DemoEditor::frame() {
   if (w_.camera) w_.camera->update(dt);
   if (flyActive_) applyFlyCamera(dt);  // editor fly cam overrides the show camera
   if (w_.app) w_.app->render();
+  if (export_.running()) {
+    // one captured frame per show-clock crossing of the capture rate (a
+    // slow frame duplicates - the video stays exactly the show duration)
+    const double show = w_.director ? w_.director->show : 0.0;
+    while (exportNextT_ <= show) {
+      export_.pushFrame();
+      exportNextT_ += 1.0 / exportFps_;
+    }
+  }
   captureViewport();
+  pumpExport(dt, fbW, fbH);
 
   // --- UI ---------------------------------------------------------------------
   ImGui_ImplOpenGL3_NewFrame();
@@ -584,6 +635,11 @@ bool DemoEditor::frame() {
   if (showAssets_) drawAssets();
   if (showProfiler_) drawProfiler();
   drawNewAssetDialog();
+  drawNewProjectConfirm();
+  if (showCurves_) drawCurveEditor();
+  drawMarkerEditDialog();
+  drawExportDialog();
+  drawPackageDialog();
   // ESC closes popups at the ImGui level (NavUpdate in NewFrame); clear our
   // flags BEFORE drawBrowse/drawScratch so their per-frame OpenPopup calls
   // don't resurrect them, and the close-edge save below fires. Skip while a
@@ -611,6 +667,13 @@ bool DemoEditor::frame() {
   ::glClear(::gl::COLOR_BUFFER_BIT);
   ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
   glfwSwapBuffers(w_.window);
+
+  // window title carries the document name + the unsaved-change marker
+  const std::string title = "NULL SECTOR // DEMO EDITOR - " + docDisplayName();
+  if (title != lastTitle_) {
+    lastTitle_ = title;
+    glfwSetWindowTitle(w_.window, title.c_str());
+  }
 
   // stats
   frameMs_ = dt * 1000.0f;
@@ -646,6 +709,7 @@ bool DemoEditor::frame() {
     }
   }
 
+  runDocSmoke(dt);  // NS_EDITOR_DOC_SMOKE: document pipeline
   // NS_EDITOR_SCENE_SMOKE=1: run the Add Scene flow programmatically
   // (queue -> append to the script -> reload -> land on the new section) and
   // log the verdict, so CI can prove the button's data path. Point --demo at
@@ -1638,6 +1702,12 @@ void DemoEditor::handleKeys() {
   if (ImGui::IsKeyPressed(ImGuiKey_F) && !io.KeyCtrl && !io.KeyShift &&
       !io.KeyAlt)
     fitTimeline();
+  // Home is the conventional video-editor shortcut for fitting the complete
+  // production in the timeline; F remains the toggle that restores the prior
+  // zoomed view.
+  if (ImGui::IsKeyPressed(ImGuiKey_Home) && !io.KeyCtrl && !io.KeyShift &&
+      !io.KeyAlt)
+    fitTimeline();
   if (ImGui::IsKeyPressed(ImGuiKey_Space)) {
     if (w_.director) w_.director->togglePause();
   }
@@ -1667,6 +1737,12 @@ void DemoEditor::handleKeys() {
                   quantizeGrid_ == 1 ? "bars" : "beats");
     Log::info("EDITOR", qb);
   }
+  // document authoring: save (Ctrl+S), Save As (Ctrl+Shift+S), undo (Ctrl+Z / Ctrl+Y)
+  if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_S)) saveDocumentAsDialog();
+  else if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_S)) saveDocument();
+  if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)) undoDocument();
+  if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)) redoDocument();
+  if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Y)) redoDocument();
   if (ImGui::IsKeyPressed(ImGuiKey_F2) && w_.app) w_.app->reloadScript();
   if (ImGui::IsKeyPressed(ImGuiKey_F11) && w_.toggleFullscreen) w_.toggleFullscreen();
   if (ImGui::IsKeyPressed(ImGuiKey_Delete) && selNode_ && selNode_->parent) {
@@ -1684,22 +1760,46 @@ void DemoEditor::drawMenuBar() {
     if (ImGui::MenuItem("Reload Script", "F2")) {
       if (w_.app) w_.app->reloadScript();
     }
+    if (ImGui::MenuItem("New Project (.nsd)...")) {
+      newProjectDialog();
+    }
+    if (ImGui::MenuItem("Load Project (.nsd)...")) {
+      openNativeFileDialog((int)BrowseKind::Script);
+    }
+    if (ImGui::MenuItem("Save Project (.nsd)", "Ctrl+S", false,
+                        !doc_.path.empty() && doc_.dirty)) {
+      saveDocument();
+    }
+    if (ImGui::MenuItem("Save Project As...", "Ctrl+Shift+S", false,
+                        !doc_.path.empty())) {
+      saveDocumentAsDialog();
+    }
+    ImGui::Separator();
     // shared asset browser: one modal, per-kind roots/exts/actions, each
     // category remembering its own scan root + last pick
     if (ImGui::BeginMenu("Open Asset")) {
-      if (ImGui::MenuItem("Load Track...")) openBrowse((int)BrowseKind::Audio);
-      if (ImGui::MenuItem("Open Texture...")) openBrowse((int)BrowseKind::Texture);
-      if (ImGui::MenuItem("Open Shader...")) openBrowse((int)BrowseKind::Shader);
-      if (ImGui::MenuItem("Open Model...")) openBrowse((int)BrowseKind::Model);
-      if (ImGui::MenuItem("Open Script...")) openBrowse((int)BrowseKind::Script);
+      if (ImGui::MenuItem("Load Track...")) openNativeFileDialog((int)BrowseKind::Audio);
+      if (ImGui::MenuItem("Open Texture...")) openNativeFileDialog((int)BrowseKind::Texture);
+      if (ImGui::MenuItem("Open Shader...")) openNativeFileDialog((int)BrowseKind::Shader);
+      if (ImGui::MenuItem("Open Model...")) openNativeFileDialog((int)BrowseKind::Model);
+      if (ImGui::MenuItem("Open Script...")) openNativeFileDialog((int)BrowseKind::Script);
       ImGui::EndMenu();
     }
     if (ImGui::MenuItem("Reset Layout")) {
       std::remove("imgui.ini");
       layoutBuilt_ = false;  // rebuild the default docking next frame
     }
+    if (ImGui::MenuItem("Export MP4...")) openExportDialog();
+    if (ImGui::MenuItem("Package Project...")) openPackageDialog();
     ImGui::Separator();
     if (ImGui::MenuItem("Quit", "Esc")) glfwSetWindowShouldClose(w_.window, 1);
+    ImGui::EndMenu();
+  }
+  if (ImGui::BeginMenu("Edit")) {
+    if (ImGui::MenuItem("Undo", "Ctrl+Z", false, doc_.canUndo())) undoDocument();
+    if (ImGui::MenuItem("Redo", "Ctrl+Y", false, doc_.canRedo())) redoDocument();
+    ImGui::Separator();
+    if (ImGui::MenuItem("Save Document", "Ctrl+S", false, doc_.dirty)) saveDocument();
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("Transport")) {
@@ -1738,6 +1838,7 @@ void DemoEditor::drawMenuBar() {
     ImGui::MenuItem("Console", nullptr, &showConsole_);
     ImGui::MenuItem("Assets", nullptr, &showAssets_);
     ImGui::MenuItem("Profiler", nullptr, &showProfiler_);
+    ImGui::MenuItem("Curves", nullptr, &showCurves_);
     // discoverable way to open the drop history without knowing about the
     // Console's right-click (the smoke uses it to render the popup live too)
     if (ImGui::MenuItem("OS Drop History")) dropHistoryOpen_ = true;
@@ -1915,8 +2016,12 @@ void DemoEditor::drawViewportPanel() {
     // forwarder (fly camera), while the texture itself is a plain draw
     ImGui::SetCursorScreenPos(p0);
     ImGui::InvisibleButton("vp_image", img);
+    // OpenGL textures use a bottom-left origin while ImGui's screen-space
+    // image coordinates use a top-left origin. Keep the live editor preview
+    // upright (the normal playback path never passes through this blit).
     dl->AddImage((ImTextureID)(intptr_t)viewport_.colorTex(), p0,
-                 ImVec2(p0.x + img.x, p0.y + img.y));
+                 ImVec2(p0.x + img.x, p0.y + img.y),
+                 ImVec2(0, 1), ImVec2(1, 0));
     dl->AddRect(p0, ImVec2(p0.x + img.x, p0.y + img.y), kLine);
     viewportHovered_ = ImGui::IsItemHovered();
     if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) viewportFocused_ = true;
@@ -2059,8 +2164,71 @@ void DemoEditor::drawNodeRec(SceneNode* n) {
   }
 }
 
+void DemoEditor::drawSceneList() {
+  if (!w_.app) return;
+  if (!ImGui::CollapsingHeader("NSD Scenes", ImGuiTreeNodeFlags_DefaultOpen)) return;
+
+  ImGui::SetNextItemWidth(-1.0f);
+  ImGui::InputTextWithHint("##scene_filter", "Filter scenes...", sceneFilter_,
+                          sizeof(sceneFilter_));
+  ImGui::TextDisabled("%zu declarations - click a row to jump and edit",
+                      doc_.ast.scenes.size());
+
+  ImGui::BeginChild("##nsd_scene_list", ImVec2(0, 185), true);
+  const std::string filter(sceneFilter_);
+  for (const auto& sc : doc_.ast.scenes) {
+    if (!filter.empty() && sc.name.find(filter) == std::string::npos &&
+        sc.title.find(filter) == std::string::npos)
+      continue;
+
+    const SceneSection* section = nullptr;
+    if (w_.app) {
+      for (const auto& candidate : w_.app->sections()) {
+        if (candidate.name == sc.name) {
+          section = &candidate;
+          break;
+        }
+      }
+    }
+    const bool active = w_.app->activeScene() == sc.name;
+    const bool selected = selScene_ == sc.name;
+    char label[384];
+    std::snprintf(label, sizeof(label), "%s%s  %s##scene_%s",
+                  active ? "▶ " : "   ", sc.visible ? "" : "[hidden]",
+                  sc.name.c_str(), sc.name.c_str());
+    ImGui::PushID(sc.name.c_str());
+    if (ImGui::Selectable(label, selected)) {
+      selScene_ = sc.name;
+      selNode_ = nullptr;
+      selEffect_.clear();
+      sceneEditScene_.clear();
+      // Scene selection is a transport operation, not a quantized scrub: land
+      // exactly on the section boundary so setup commands fire deterministically.
+      if (section) seekToRaw(section->start);
+    }
+    if (ImGui::IsItemHovered()) {
+      if (section)
+        ImGui::SetTooltip("Jump to %s (%s - %s)\nClick to edit this scene",
+                          sc.name.c_str(), fmtTime(section->start).c_str(),
+                          fmtTime(section->end).c_str());
+      else
+        ImGui::SetTooltip("Not scheduled (visible=false or no activation)\nClick to edit metadata");
+    }
+    ImGui::SameLine();
+    if (section)
+      ImGui::TextDisabled("%s - %s", fmtTime(section->start).c_str(),
+                          fmtTime(section->end).c_str());
+    else
+      ImGui::TextDisabled("not scheduled");
+    ImGui::PopID();
+  }
+  ImGui::EndChild();
+}
+
 void DemoEditor::drawHierarchy() {
   ImGui::Begin("Hierarchy", &showHierarchy_);
+
+  drawSceneList();
 
   // effect instances (not part of the scene graph)
   if (ImGui::CollapsingHeader("Effects", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2070,18 +2238,18 @@ void DemoEditor::drawHierarchy() {
     }
     for (const auto& kv : all) {
       const bool active = isEffectActive(kv.first);
-      const ImU32 col = active ? kPhosphor : kDim;
       char label[384];
       std::snprintf(label, sizeof label, "%s  %s", active ? "●" : "○", kv.first.c_str());
       if (ImGui::Selectable(label, selEffect_ == kv.first)) {
         selEffect_ = kv.first;
         selNode_ = nullptr;
+        selScene_.clear();
       }
     }
   }
 
-  // scene graph
-  if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen)) {
+  // live scene graph (nodes/effect instances), distinct from the .nsd scene declarations above
+  if (ImGui::CollapsingHeader("Scene Graph", ImGuiTreeNodeFlags_DefaultOpen)) {
     SceneGraph& g = w_.app->editableScene();
     SceneNode* root = g.root();
     if (root) {
@@ -2089,6 +2257,138 @@ void DemoEditor::drawHierarchy() {
     }
   }
   ImGui::End();
+}
+
+void DemoEditor::loadSceneEditorBuffers() {
+  const SceneDef* scene = doc_.findScene(selScene_);
+  if (!scene) return;
+  std::snprintf(sceneTitleBuf_, sizeof(sceneTitleBuf_), "%s", scene->title.c_str());
+  constexpr size_t kSetupCapacity = 32768;
+  sceneSetupBuf_.assign(kSetupCapacity, 0);
+  size_t used = 0;
+  for (const auto& cmd : scene->setup) {
+    const std::string line = nsdSerializeCmd(cmd) + "\n";
+    if (used + line.size() + 1 >= sceneSetupBuf_.size()) break;
+    std::memcpy(sceneSetupBuf_.data() + used, line.data(), line.size());
+    used += line.size();
+  }
+  sceneSetupBuf_[used] = '\0';
+  sceneEditScene_ = selScene_;
+  sceneSetupDirty_ = false;
+}
+
+bool DemoEditor::applySceneSetup() {
+  SceneDef* scene = doc_.findScene(selScene_);
+  if (!scene || sceneSetupBuf_.empty()) return false;
+  const std::string wrapper =
+      "demo \"Scene Editor\" { duration 1 }\nscene " + selScene_ +
+      " {\n" + std::string(sceneSetupBuf_.data()) + "}\n";
+  try {
+    const Script parsed = ScriptParser::parse(wrapper, "scene editor");
+    const SceneDef* edited = nullptr;
+    for (const auto& candidate : parsed.scenes)
+      if (candidate.name == selScene_) { edited = &candidate; break; }
+    if (!edited) return false;
+    doc_.beginEdit("edit scene setup");
+    scene->setup = edited->setup;
+    doc_.endEdit();
+    if (!writeDocument()) return false;
+    sceneSetupDirty_ = false;
+    loadSceneEditorBuffers();
+    Log::info("EDITOR", "scene setup updated: " + selScene_);
+    return true;
+  } catch (const std::exception& e) {
+    Log::error("EDITOR", "scene setup rejected: " + std::string(e.what()));
+    return false;
+  }
+}
+
+void DemoEditor::inspectScene() {
+  if (sceneEditScene_ != selScene_) loadSceneEditorBuffers();
+  SceneDef* scene = doc_.findScene(selScene_);
+  if (!scene) return;
+
+  ImGui::TextDisabled(".nsd scene declaration");
+  ImGui::SeparatorText(scene->name.c_str());
+  ImGui::TextDisabled("Scene names are stable schedule identifiers");
+
+  auto commitField = [this]() {
+    doc_.endEdit();
+    writeDocument();
+  };
+
+  ImGui::Text("start / end");
+  ImGui::SameLine();
+  const SceneSection* section = nullptr;
+  for (const auto& candidate : w_.app->sections()) {
+    if (candidate.name == scene->name) { section = &candidate; break; }
+  }
+  if (section) {
+    ImGui::Text("%s  -  %s", fmtTime(section->start).c_str(),
+                fmtTime(section->end).c_str());
+    if (ImGui::Button("Jump to start")) seekToRaw(section->start);
+  } else {
+    ImGui::TextDisabled("not scheduled");
+  }
+
+  ImGui::SeparatorText("Metadata");
+  if (ImGui::InputText("Title", sceneTitleBuf_, sizeof(sceneTitleBuf_))) {
+    doc_.beginEdit("edit scene title");
+    scene->title = sceneTitleBuf_;
+  }
+  if (ImGui::IsItemDeactivatedAfterEdit()) commitField();
+
+  int bars = scene->bars;
+  if (ImGui::DragInt("Bars (0 = auto)", &bars, 1.0f, 0, 100000)) {
+    doc_.beginEdit("edit scene bars");
+    scene->bars = bars;
+  }
+  if (ImGui::IsItemDeactivatedAfterEdit()) commitField();
+
+  float duration = scene->duration;
+  if (ImGui::DragFloat("Duration sec (0 = bars)", &duration, 0.05f, 0.0f, 100000.0f)) {
+    doc_.beginEdit("edit scene duration");
+    scene->duration = duration;
+  }
+  if (ImGui::IsItemDeactivatedAfterEdit()) commitField();
+
+  float intensity = scene->intensity;
+  if (ImGui::SliderFloat("Intensity", &intensity, 0.0f, 1.0f)) {
+    doc_.beginEdit("edit scene intensity");
+    scene->intensity = intensity;
+  }
+  if (ImGui::IsItemDeactivatedAfterEdit()) commitField();
+
+  int chapter = scene->chapter;
+  if (ImGui::DragInt("Chapter", &chapter, 1.0f, 0, 1000)) {
+    doc_.beginEdit("edit scene chapter");
+    scene->chapter = chapter;
+  }
+  if (ImGui::IsItemDeactivatedAfterEdit()) commitField();
+
+  bool visible = scene->visible;
+  if (ImGui::Checkbox("Participates in schedule", &visible)) {
+    doc_.beginEdit("edit scene visibility");
+    scene->visible = visible;
+  }
+  if (ImGui::IsItemDeactivatedAfterEdit()) commitField();
+
+  ImGui::SeparatorText("Setup commands");
+  ImGui::TextDisabled("One command per line. These run when the scene activates.");
+  ImGui::TextDisabled("Use the timeline for scene-relative 'at' blocks.");
+  if (sceneSetupBuf_.empty()) loadSceneEditorBuffers();
+  if (ImGui::InputTextMultiline("##scene_setup", sceneSetupBuf_.data(),
+                                sceneSetupBuf_.size(), ImVec2(-1, 180)))
+    sceneSetupDirty_ = true;
+  if (sceneSetupDirty_) {
+    if (ImGui::Button("Apply setup")) applySceneSetup();
+    ImGui::SameLine();
+    if (ImGui::Button("Revert setup")) loadSceneEditorBuffers();
+    ImGui::SameLine();
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(kAmber), "unsaved setup edits");
+  } else {
+    ImGui::TextDisabled("setup matches the .nsd document");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2127,10 +2427,16 @@ void DemoEditor::inspectNode(SceneNode* n) {
   // transform (round-trips through the graph so world matrices recompute)
   ImGui::SeparatorText("Transform");
   V3 p = n->pos;
+  if (editorKeyframeButton("kf_pos")) keyframeNodeProperty(n, "pos");
+  ImGui::SameLine();
   if (ImGui::DragFloat3("Position", p.data(), 0.05f)) n->setPos(p);
   V3 e = quatToEulerDeg(n->rot);
+  if (editorKeyframeButton("kf_rot")) keyframeNodeProperty(n, "euler");
+  ImGui::SameLine();
   if (ImGui::DragFloat3("Rotation (deg)", e.data(), 0.5f)) n->setEuler(e);
   V3 s = n->scale;
+  if (editorKeyframeButton("kf_scl")) keyframeNodeProperty(n, "scale");
+  ImGui::SameLine();
   if (ImGui::DragFloat3("Scale", s.data(), 0.01f, 0.001f, 1000.0f)) n->setScale(s);
 
   // payload
@@ -2258,7 +2564,13 @@ void DemoEditor::inspectEffect(Effect* e) {
 
 void DemoEditor::drawInspector() {
   ImGui::Begin("Inspector", &showInspector_);
-  if (selNode_) {
+  if (!selScene_.empty()) {
+    if (doc_.findScene(selScene_)) inspectScene();
+    else selScene_.clear();
+  }
+  if (!selScene_.empty()) {
+    // The selected .nsd declaration owns the production-level controls.
+  } else if (selNode_) {
     inspectNode(selNode_);
   } else if (!selEffect_.empty()) {
     Effect* e = w_.app->findEffect(selEffect_);
@@ -2282,7 +2594,11 @@ void DemoEditor::drawTimeline() {
   const float show = w_.director ? w_.director->show : 0;
 
   ImGui::PushItemWidth(130);
-  if (ImGui::SliderFloat("view", &tlZoom_, 8.0f, 240.0f, "%.0f s")) {
+  // The slider must be able to represent the entire production. The old
+  // fixed 240-second ceiling made a 346-second show impossible to fit and
+  // silently clipped the Fit state back to 240 seconds on the next frame.
+  const float maxView = std::max(240.0f, std::max(te.duration, 8.0f));
+  if (ImGui::SliderFloat("view", &tlZoom_, 8.0f, maxView, "%.0f s")) {
     tlT0_ = clampTlT0(tlT0_, tlZoom_, te.duration);  // keep the window in range
     tlFitZoom_ = -1.0f;  // a manual zoom leaves fit mode; the next F re-fits
   }
@@ -2290,9 +2606,9 @@ void DemoEditor::drawTimeline() {
   if (ImGui::IsItemDeactivatedAfterEdit()) scheduleSaveEditorState();
   ImGui::PopItemWidth();
   ImGui::SameLine();
-  if (ImGui::Button(tlFitZoom_ >= 0.0f ? "Restore" : "Fit")) fitTimeline();
+  if (ImGui::Button(tlFitZoom_ >= 0.0f ? "Restore" : "Fit All")) fitTimeline();
   if (ImGui::IsItemHovered())
-    ImGui::SetTooltip("Fit the whole show (F); press again to restore the "
+    ImGui::SetTooltip("Fit the whole show (F / Home); press again to restore the "
                       "previous view");
   // the audio strip lives in this panel, so its control does too: the toolbar
   // TRK button can be lost when the floating toolbar is closed/docked narrow,
@@ -2342,11 +2658,47 @@ void DemoEditor::drawTimeline() {
     dl->AddText(ImVec2(x + 3, r0.y + 4), kFaint, b);
   }
 
-  // markers
+  // markers: click = jump, drag = move, double-click = edit (the document
+  // side lives in editor_markers.cpp)
+  const ImGuiIO& mio = ImGui::GetIO();
   for (const auto& m : te.markers) {
     const float x = o.x + xOf(m.time);
-    dl->AddTriangleFilled(ImVec2(x, r0.y + 2), ImVec2(x - 5, r0.y + 11), ImVec2(x + 5, r0.y + 11), kAmber);
-    dl->AddText(ImVec2(x + 6, r0.y + 2), kAmber, m.name.c_str());
+    const ImU32 col =
+        (markerDragging_ && m.name == markerDragName_) ? kHot : kAmber;
+    dl->AddTriangleFilled(ImVec2(x, r0.y + 2), ImVec2(x - 5, r0.y + 11),
+                          ImVec2(x + 5, r0.y + 11), col);
+    dl->AddText(ImVec2(x + 6, r0.y + 2), col, m.name.c_str());
+  }
+  if (mio.MousePos.y >= r0.y && mio.MousePos.y <= r1.y) {
+    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+      for (const auto& m : te.markers) {
+        const float mx = o.x + xOf(m.time);
+        if (std::fabs(mio.MousePos.x - mx) <= 10.0f) {
+          if (markerDragging_) {  // the first press of the double-click began a drag
+            markerDragging_ = false;
+            doc_.cancelEdit();
+            markerDragName_.clear();
+          }
+          openMarkerEdit(m.name);
+          break;
+        }
+      }
+    } else if (!markerDragging_ &&
+               ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+      for (const auto& m : te.markers) {
+        const float mx = o.x + xOf(m.time);
+        if (std::fabs(mio.MousePos.x - mx) <= 8.0f) {
+          markerDragBegin(m.name);
+          break;
+        }
+      }
+    }
+  }
+  if (markerDragging_) {
+    float mt = tOf(mio.MousePos.x - o.x);
+    if (quantize_) mt = snapKeyTime(mt);
+    markerDragMove(markerDragName_, std::max(mt, 0.0f));
+    if (!mio.MouseDown[ImGuiMouseButton_Left]) markerDragEnd();
   }
 
   // playhead on the ruler
@@ -3177,17 +3529,34 @@ std::string DemoEditor::showKey() const {
 }
 
 bool DemoEditor::applyTimelineViewForShow(const std::string& key) {
-  // restore the show's saved zoom/scroll/fit window EXACTLY - the window may
-  // extend past the end if the header duration changed since, but the slider
-  // and scrollbar re-clamp on the next interaction. Unknown show = first
-  // visit: keep the current window and report that nothing was applied.
-  if (key.empty() || !std::filesystem::exists(editorStatePath())) return false;
+  // A video editor opens a project with the whole production visible. Once
+  // the user zooms or pans, the per-project view is restored on the next
+  // launch/switch instead of losing that authoring context.
+  if (key.empty()) return false;
+  const float dur = w_.app ? w_.app->editor().duration : 0.0f;
+  const auto fitWholeShow = [&] {
+    // Keep the current zoom as the Restore target, unless we were already in
+    // fit mode (then tlFitZoom_ is the user's previous zoomed view).
+    if (tlFitZoom_ < 0.0f) {
+      tlFitZoom_ = tlZoom_;
+      tlFitT0_ = tlT0_;
+    }
+    tlZoom_ = std::max(dur, 8.0f);
+    tlT0_ = 0.0f;
+  };
+  if (!std::filesystem::exists(editorStatePath())) {
+    fitWholeShow();
+    return false;
+  }
   try {
     const Value vv =
         Json::parseFile(editorStatePath()).get("timelineViews").get(key);
-    if (vv.isNull()) return false;
+    if (vv.isNull()) {
+      fitWholeShow();
+      return false;
+    }
     tlZoom_ = std::max(8.0f, vv.get("zoom").asFloat(tlZoom_));
-    tlT0_ = vv.get("t0").asFloat(tlT0_);
+    tlT0_ = clampTlT0(vv.get("t0").asFloat(tlT0_), tlZoom_, dur);
     tlFitZoom_ = vv.get("fitZoom").asFloat(-1.0f);
     tlFitT0_ = vv.get("fitT0").asFloat(0.0f);
     Log::info("EDITOR", "timeline view restored for " + key);
@@ -3205,13 +3574,9 @@ void DemoEditor::switchShow(const std::string& path) {
   if (!w_.app) return;
   saveEditorState();
   w_.app->editorOpenScript(path);
-  if (!applyTimelineViewForShow(showKey())) {
-    // first visit to this show: inherit the current window, but NOT the
-    // previous show's armed fit toggle - F must fit THIS show, not 'restore'
-    // the other one's view
-    tlFitZoom_ = -1.0f;
-    tlFitT0_ = 0.0f;
-  }
+  // Existing per-project view is restored; a new project is automatically
+  // fitted to its complete duration by applyTimelineViewForShow().
+  applyTimelineViewForShow(showKey());
 }
 
 void DemoEditor::seekTo(float t) {
@@ -3359,7 +3724,7 @@ void DemoEditor::drawAudioPopup() {
   ImGui::SetNextItemWidth(240);
   ImGui::InputText("##audioPath", audioPath_, sizeof(audioPath_));
   ImGui::SameLine();
-  if (ImGui::Button("Browse...")) openBrowse((int)BrowseKind::Audio);
+  if (ImGui::Button("Browse...")) openNativeFileDialog((int)BrowseKind::Audio);
   ImGui::SameLine();
   // an empty path must NOT be treated as "stop audio" here - that is what the
   // explicit button below is for (swapTrack("") means silence)
@@ -3416,7 +3781,7 @@ const BrowseKindDef kBrowseKinds[] = {
      {".png", ".jpg", ".jpeg", ".tga", ".bmp"}, 5},
     {"shader", "empty root lists shaders/, data/shaders and data/shadertoy", "Show",
      {".frag", ".vert", ".glsl"}, 3},
-    {"model", "empty root lists data/models", "Load", {".obj"}, 1},
+    {"model", "empty root lists data/models", "Load", {".obj", ".glb"}, 2},
     {"script", "empty root lists data/", "Open", {".nsd"}, 1},
 };
 }  // namespace
@@ -3449,6 +3814,260 @@ std::vector<std::string> DemoEditor::browseRoots(int kind) const {
     default: break;
   }
   return roots;
+}
+
+bool DemoEditor::openNativeFileDialog(int kind) {
+  if (kind < 0 || kind >= (int)BrowseKind::Count) return false;
+  browseKind_ = kind;
+
+#ifdef _WIN32
+  // Use the native Windows picker for menu and Browse... actions. The
+  // in-editor recursive browser remains available as a fallback and for
+  // dropped folders, but it is not a substitute for navigating arbitrary
+  // filesystem locations.
+  static const wchar_t kAudioFilter[] =
+      L"Audio files\0*.wav;*.mp3;*.ogg;*.flac\0All files\0*.*\0\0";
+  static const wchar_t kTextureFilter[] =
+      L"Images\0*.png;*.jpg;*.jpeg;*.tga;*.bmp\0All files\0*.*\0\0";
+  static const wchar_t kShaderFilter[] =
+      L"Shaders\0*.frag;*.vert;*.glsl\0All files\0*.*\0\0";
+  static const wchar_t kModelFilter[] =
+      L"Models\0*.obj;*.glb\0All files\0*.*\0\0";
+  static const wchar_t kScriptFilter[] =
+      L"Null Sector scripts\0*.nsd\0All files\0*.*\0\0";
+  const wchar_t* filter = kAudioFilter;
+  switch ((BrowseKind)kind) {
+    case BrowseKind::Texture: filter = kTextureFilter; break;
+    case BrowseKind::Shader:  filter = kShaderFilter; break;
+    case BrowseKind::Model:   filter = kModelFilter; break;
+    case BrowseKind::Script:  filter = kScriptFilter; break;
+    default: break;
+  }
+
+  wchar_t fileName[32768] = {};
+  AssetBrowse& b = browse_[kind];
+  std::wstring initialDir;
+  if (b.root[0] != '\0') {
+    initialDir = std::filesystem::path(b.root).wstring();
+  } else {
+    const auto roots = browseRoots(kind);
+    if (!roots.empty()) initialDir = std::filesystem::absolute(roots.front()).wstring();
+  }
+
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = w_.window ? glfwGetWin32Window(w_.window) : nullptr;
+  ofn.lpstrFile = fileName;
+  ofn.nMaxFile = (DWORD)(sizeof(fileName) / sizeof(fileName[0]));
+  ofn.lpstrFilter = filter;
+  ofn.nFilterIndex = 1;
+  ofn.lpstrInitialDir = initialDir.empty() ? nullptr : initialDir.c_str();
+  ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR |
+              OFN_HIDEREADONLY;
+
+  if (GetOpenFileNameW(&ofn)) {
+    const std::filesystem::path selected{std::wstring(fileName)};
+    const std::string path = selected.string();
+    b.root[0] = '\0';
+    const std::string parent = selected.parent_path().string();
+    std::strncpy(b.root, parent.c_str(), sizeof(b.root) - 1);
+    b.root[sizeof(b.root) - 1] = '\0';
+    b.sel = path;
+    b.scanned = false;
+    pickBrowseFile(kind, path);
+    saveEditorState();
+    return true;
+  }
+  if (CommDlgExtendedError() != 0) {
+    Log::warn("EDITOR", "native file dialog failed; using the in-editor browser");
+    openBrowse(kind);
+    return false;
+  }
+  return false;  // user cancelled; leave the editor state unchanged
+#else
+  // Keep the existing cross-platform browser on non-Windows builds. It is
+  // still useful in headless/dev environments where no native picker exists.
+  openBrowse(kind);
+  return true;
+#endif
+}
+
+void DemoEditor::saveDocumentAsDialog() {
+#ifdef _WIN32
+  std::filesystem::path defaultPath = doc_.path.empty()
+      ? std::filesystem::absolute("project.nsd")
+      : std::filesystem::absolute(doc_.path);
+  wchar_t fileName[32768] = {};
+  const std::wstring defaultName = defaultPath.wstring();
+  const std::wstring initialDir = defaultPath.parent_path().wstring();
+  std::wcsncpy(fileName, defaultName.c_str(),
+               sizeof(fileName) / sizeof(fileName[0]) - 1);
+  static const wchar_t kNsdFilter[] =
+      L"Null Sector scripts\0*.nsd\0All files\0*.*\0\0";
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = w_.window ? glfwGetWin32Window(w_.window) : nullptr;
+  ofn.lpstrFile = fileName;
+  ofn.nMaxFile = (DWORD)(sizeof(fileName) / sizeof(fileName[0]));
+  ofn.lpstrFilter = kNsdFilter;
+  ofn.nFilterIndex = 1;
+  ofn.lpstrInitialDir = initialDir.c_str();
+  ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  if (!GetSaveFileNameW(&ofn)) return;
+  std::string selected = std::filesystem::path(std::wstring(fileName)).string();
+  std::string ext = std::filesystem::path(selected).extension().string();
+  for (char& c : ext) if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+  if (ext != ".nsd") selected += ".nsd";
+  writeDocumentAs(selected);
+#else
+  Log::warn("EDITOR", "Save Project As requires a native file picker on this build");
+#endif
+}
+
+void DemoEditor::newProjectDialog() {
+#ifdef _WIN32
+  const std::filesystem::path defaultPath =
+      std::filesystem::absolute(std::filesystem::path(w_.dataDir) / "NewProject.nsd");
+  wchar_t fileName[32768] = {};
+  const std::wstring defaultName = defaultPath.wstring();
+  const std::wstring initialDir = defaultPath.parent_path().wstring();
+  std::wcsncpy(fileName, defaultName.c_str(),
+               sizeof(fileName) / sizeof(fileName[0]) - 1);
+  static const wchar_t kNsdFilter[] =
+      L"Null Sector scripts\0*.nsd\0All files\0*.*\0\0";
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = w_.window ? glfwGetWin32Window(w_.window) : nullptr;
+  ofn.lpstrFile = fileName;
+  ofn.nMaxFile = (DWORD)(sizeof(fileName) / sizeof(fileName[0]));
+  ofn.lpstrFilter = kNsdFilter;
+  ofn.nFilterIndex = 1;
+  ofn.lpstrInitialDir = initialDir.c_str();
+  ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  if (!GetSaveFileNameW(&ofn)) return;
+  std::string selected = std::filesystem::path(std::wstring(fileName)).string();
+  std::string ext = std::filesystem::path(selected).extension().string();
+  for (char& c : ext) if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+  if (ext != ".nsd") selected += ".nsd";
+  if (doc_.dirty) {
+    pendingNewProjectPath_ = selected;
+    newProjectConfirmOpen_ = true;
+  } else {
+    createNewProject(selected);
+  }
+#else
+  Log::warn("EDITOR", "New Project requires a native file picker on this build");
+#endif
+}
+
+namespace {
+
+std::string editorExecutablePath() {
+#ifdef _WIN32
+  wchar_t path[32768] = {};
+  const DWORD n = GetModuleFileNameW(nullptr, path,
+                                     (DWORD)(sizeof(path) / sizeof(path[0])));
+  if (n > 0 && n < sizeof(path) / sizeof(path[0]))
+    return std::filesystem::path(std::wstring(path, n)).string();
+  return std::string();
+#else
+  std::error_code ec;
+  const std::filesystem::path p = std::filesystem::absolute("ns_demo", ec);
+  return ec ? std::string() : p.string();
+#endif
+}
+
+}  // namespace
+
+void DemoEditor::openPackageDialog() {
+  packageHasResult_ = false;
+  packageOk_ = false;
+  packageMessage_.clear();
+  std::string stem = w_.app ? std::filesystem::path(w_.app->scriptPath()).stem().string()
+                            : "project";
+  if (stem.empty()) stem = "project";
+  const std::filesystem::path defaultZip =
+      std::filesystem::absolute(stem + "_distribution.zip");
+
+#ifdef _WIN32
+  wchar_t fileName[32768] = {};
+  const std::wstring defaultName = defaultZip.wstring();
+  std::wcsncpy(fileName, defaultName.c_str(),
+               sizeof(fileName) / sizeof(fileName[0]) - 1);
+  static const wchar_t kZipFilter[] =
+      L"ZIP distribution\0*.zip\0All files\0*.*\0\0";
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = w_.window ? glfwGetWin32Window(w_.window) : nullptr;
+  ofn.lpstrFile = fileName;
+  ofn.nMaxFile = (DWORD)(sizeof(fileName) / sizeof(fileName[0]));
+  ofn.lpstrFilter = kZipFilter;
+  ofn.nFilterIndex = 1;
+  ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  if (!GetSaveFileNameW(&ofn)) return;
+  std::string selected = std::filesystem::path(std::wstring(fileName)).string();
+  if (std::filesystem::path(selected).extension() != ".zip") selected += ".zip";
+  std::strncpy(packageZipPath_, selected.c_str(), sizeof(packageZipPath_) - 1);
+  packageZipPath_[sizeof(packageZipPath_) - 1] = '\0';
+  packageDialogOpen_ = true;
+  startPackage(packageZipPath_);
+#else
+  std::snprintf(packageZipPath_, sizeof(packageZipPath_), "%s",
+                defaultZip.string().c_str());
+  packageDialogOpen_ = true;
+#endif
+}
+
+void DemoEditor::startPackage(const std::string& outputZip) {
+  if (!w_.app || outputZip.empty()) return;
+  std::string finalOutput = outputZip;
+  std::string ext = std::filesystem::path(finalOutput).extension().string();
+  for (char& c : ext) if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+  if (ext != ".zip") finalOutput += ".zip";
+  std::strncpy(packageZipPath_, finalOutput.c_str(), sizeof(packageZipPath_) - 1);
+  packageZipPath_[sizeof(packageZipPath_) - 1] = '\0';
+  const std::filesystem::path data = std::filesystem::absolute(w_.dataDir);
+  const std::filesystem::path root = data.parent_path();
+  const std::string track =
+      w_.audio && w_.audio->trackMode ? w_.audio->trackPath() : std::string();
+  const std::string exe = editorExecutablePath();
+  const EditorPackageResult r = packageEditorProject(
+      root.string(), w_.app->scriptPath(), track, exe, finalOutput);
+  packageOk_ = r.ok;
+  packageHasResult_ = true;
+  packageMessage_ = r.message;
+  if (r.ok) {
+    packageMessage_ += "\nZIP: " + r.outputZip +
+                       "\nNSP: " + std::to_string(r.nspBytes / 1048576.0) +
+                       " MB, archive: " + std::to_string(r.zipBytes / 1048576.0) + " MB";
+    Log::info("EDITOR", "project package complete: " + r.outputZip);
+  } else {
+    Log::error("EDITOR", "project package failed: " + r.message);
+  }
+}
+
+void DemoEditor::drawPackageDialog() {
+  if (!packageDialogOpen_) return;
+  ImGui::OpenPopup("Package Project");
+  if (!ImGui::BeginPopupModal("Package Project", &packageDialogOpen_,
+                              ImGuiWindowFlags_AlwaysAutoResize)) return;
+  if (!packageHasResult_) {
+    ImGui::TextUnformatted("Create a standalone project distribution");
+    ImGui::TextDisabled("The package contains the NSP assets, a copied engine executable,");
+    ImGui::TextDisabled("and launch.bat with the correct --play switch.");
+    ImGui::InputText("Output ZIP", packageZipPath_, sizeof(packageZipPath_));
+    if (ImGui::Button("Package")) startPackage(packageZipPath_);
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) packageDialogOpen_ = false;
+  } else {
+    ImGui::TextColored(packageOk_ ? ImVec4(0.37f, 0.94f, 0.78f, 1.0f)
+                                  : ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                       packageOk_ ? "Package complete" : "Package failed");
+    ImGui::Separator();
+    ImGui::TextWrapped("%s", packageMessage_.c_str());
+    if (ImGui::Button("Close")) packageDialogOpen_ = false;
+  }
+  ImGui::EndPopup();
 }
 
 void DemoEditor::openBrowse(int kind) {
@@ -4673,127 +5292,31 @@ void DemoEditor::openAssetDialog() {
 void DemoEditor::applyQueuedActions() {
   if (sceneAddQueued_) {
     sceneAddQueued_ = false;
-    addScene();
+    addSceneViaDocument();  // the document op (writes the AST, not raw text)
   }
 }
 
-void DemoEditor::addScene() {
-  if (!w_.app || !w_.timeline) return;
-
-  // the new scene starts right after the last section (or at the show end)
-  const auto& secs = w_.app->sections();
-  float nextStart = 0;
-  if (!secs.empty()) nextStart = secs.back().end;
-  const float dur = w_.app->editor().duration;
-  if (dur > nextStart) nextStart = dur;
-
-  // unique scene name (SceneN) against the existing section names
-  int n = (int)secs.size();
-  std::string name = "Scene" + std::to_string(n);
-  bool taken = true;
-  while (taken) {
-    taken = false;
-    for (const auto& s : secs) {
-      if (s.name == name) { taken = true; break; }
-    }
-    if (taken) name = "Scene" + std::to_string(++n);
+void DemoEditor::drawNewProjectConfirm() {
+  if (!newProjectConfirmOpen_) return;
+  ImGui::OpenPopup("Create New Project?");
+  if (!ImGui::BeginPopupModal("Create New Project?", &newProjectConfirmOpen_,
+                              ImGuiWindowFlags_AlwaysAutoResize)) return;
+  ImGui::TextWrapped("The current project has unsaved changes.");
+  ImGui::TextWrapped("Create a new project and discard those changes?");
+  ImGui::TextDisabled("%s", pendingNewProjectPath_.c_str());
+  ImGui::Separator();
+  if (ImGui::Button("Create New Project")) {
+    const std::string path = pendingNewProjectPath_;
+    newProjectConfirmOpen_ = false;
+    pendingNewProjectPath_.clear();
+    createNewProject(path);
   }
-
-  // 8 bars at the show's tempo - a blank scene with a camera + a placeholder
-  // effect, matching the scene-block style of demo.nsd
-  const int bars = 8;
-  const float barSec = w_.timeline->barSec();
-  const float nextEnd = nextStart + bars * barSec;
-  char tBuf[32];
-  auto fmt = [&tBuf](float t) {
-    std::snprintf(tBuf, sizeof tBuf, "%g", t);
-    return std::string(tBuf);
-  };
-
-  std::string block;
-  block += "\n// ---------------------------------------------------------------------------\n";
-  block += "// scene added by the Demo Editor - blank starting scene (camera + tunnel)\n";
-  block += "// ---------------------------------------------------------------------------\n";
-  block += "scene " + name + " {\n";
-  block += "    bars " + std::to_string(bars) + "  intensity 0.5  chapter 5\n";
-  block += "    title \"" + name + "\"\n";
-  block += "    camera " + name +
-           "Cam { rig static; pos (0,0,4); target (0,0,0); fov 55 }\n";
-  block += "    show tunnel\n";
-  block += "    fade in 1\n";
-  block += "    at " + fmt(bars * barSec - 3.0f) + " { fade out 2 }\n";
-  block += "}\n\n";
-  block += "at " + fmt(nextStart) + " { show " + name + "; marker " + name + " }\n";
-
-  const std::string path = w_.app->scriptPath();
-  {
-    // Read once, write once: bump the header `duration` past the new scene
-    // (the declared duration is the show contract - ScriptEngine::build) so
-    // the show doesn't loop at the old end and truncate the new scene, then
-    // append the block. Only the first NON-comment `duration N` is touched
-    // (the demo{} header); comments mention "duration" too.
-    std::ifstream fin(path, std::ios::binary);
-    if (!fin) {
-      Log::error("EDITOR", "Add Scene: cannot read '" + path + "'");
-      return;
-    }
-    std::string text((std::istreambuf_iterator<char>(fin)),
-                     std::istreambuf_iterator<char>());
-
-    std::istringstream iss(text);
-    std::ostringstream oss;
-    std::string line;
-    bool bumped = false;
-    while (std::getline(iss, line)) {
-      const bool crlf = !line.empty() && line.back() == '\r';
-      if (crlf) line.pop_back();
-      if (!bumped) {
-        const size_t ns = line.find_first_not_of(" \t");
-        const bool comment = ns != std::string::npos && line[ns] == '/';
-        if (!comment) {
-          const size_t pos = line.find("duration");
-          if (pos != std::string::npos) {
-            size_t i = pos + 8;
-            while (i < line.size() && !(line[i] >= '0' && line[i] <= '9')) ++i;
-            size_t j = i;
-            while (j < line.size() &&
-                   ((line[j] >= '0' && line[j] <= '9') || line[j] == '.'))
-              ++j;
-            if (i < j) {
-              line.replace(i, j - i, fmt(nextEnd));
-              bumped = true;
-            }
-          }
-        }
-      }
-      oss << line << (crlf ? "\r\n" : "\n");
-    }
-    std::ofstream fout(path, std::ios::binary);
-    if (!fout) {
-      Log::error("EDITOR", "Add Scene: cannot write '" + path + "'");
-      return;
-    }
-    fout << oss.str() << block;
-    if (!bumped) {
-      Log::warn("EDITOR", "Add Scene: no header `duration` to extend - the new scene "
-                           "may be clamped to the default scene length");
-    }
+  ImGui::SameLine();
+  if (ImGui::Button("Cancel")) {
+    newProjectConfirmOpen_ = false;
+    pendingNewProjectPath_.clear();
   }
-  Log::info("EDITOR", "scene '" + name + "' appended to " + path);
-
-  // re-baseline the watcher so it doesn't flag the file we just wrote and
-  // reload the show a second time; then one deterministic reload + land on it
-  w_.app->editableWatcher().poll();
-  w_.app->reloadScript();
-  // land a hair BEFORE the activation: the next update's forward crossing
-  // fires `at <nextStart> { show <name> }`, so the new scene actually
-  // activates (a plain seek re-arms the fire boundary without firing it).
-  // seekToRaw: this is a programmatic landing, never quantized.
-  seekToRaw(nextStart - 0.001f);
-  // if the director was paused, resume so that crossing happens immediately
-  // (the paused branch of update() never advances the timeline editor, so
-  // the activation would otherwise wait until the user hits play)
-  if (w_.director && w_.director->paused) w_.director->paused = false;
+  ImGui::EndPopup();
 }
 
 void DemoEditor::drawNewAssetDialog() {

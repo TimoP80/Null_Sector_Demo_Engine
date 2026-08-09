@@ -2,7 +2,7 @@
 // AppAssets - registers the GL-backed asset kinds into an AssetManager:
 //
 //   texture   PNG/JPEG -> Texture* (stb_image)
-//   model     OBJ -> Model* (ObjImporter; Assimp glTF/FBX plugs in here)
+//   model     OBJ/GLB -> Model* (self-contained importers)
 //   material  JSON -> Material*
 //   scene     JSON -> SceneGraph
 //   timeline  JSON -> TimelineEditor

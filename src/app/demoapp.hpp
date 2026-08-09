@@ -119,7 +119,7 @@ public:
   void editorLoadPreset(const std::string& name) { loadPreset(name); }
   /** warm/load a texture by name (data/textures/NAME.ext); safe from the UI */
   void editorLoadTexture(const std::string& name);
-  /** warm the model cache for data/models/NAME.obj; safe from the UI */
+  /** warm the model cache for data/models/NAME.obj or NAME.glb; safe from the UI */
   void editorLoadModel(const std::string& file) { loadModelFile(file); }
   /** switch the running demo script to PATH and reload it; safe from the UI */
   void editorOpenScript(const std::string& path);
@@ -145,6 +145,16 @@ public:
   //     per frame by the director, so edits here go live immediately) ---------
   SceneGraph& editableScene() { return scene_; }
   TimelineEditor& editableEditor() { return editor_; }
+  /** live keyframe preview: the animation library rebuilt by the script; the
+  *  curve editor edits channels here for instant feedback (the document AST
+  *  stays the source of truth until Ctrl+S) */
+  AnimationSystem& editableAnims() { return anims_; }
+  /** apply an `anim` command now (the curve editor's live preview; mirrors
+   *  the script dispatch) */
+  void editorApplyAnim(const Cmd& cmd) { cmdAnim(cmd); }
+  /** incremented on every script reload (incl. watcher-driven); the editor
+   *  uses it to re-adopt the document when an external edit reloads the show */
+  uint64_t reloadCount() const { return reloadCount_; }
   /** every instanced effect (active or not), keyed by instance name */
   const std::map<std::string, std::unique_ptr<Effect>>& allEffects() const { return effects_; }
   Effect* findEffect(const std::string& name);
@@ -249,6 +259,7 @@ private:
 
   // live reload + frame state
   bool reloadQueued_ = false;
+  uint64_t reloadCount_ = 0;
   uint64_t frame_ = 0;
   float lastShow_ = -1e9f;
   float lastDt_ = 1.0f / 60.0f;
@@ -276,8 +287,18 @@ private:
   Texture logoWordmark_;
   bool logoWired_ = false;
 
-  // per-texture handles for sprite nodes (acquired once, never re-bumped)
+  // per-texture handles for sprite/image nodes (acquired once, never re-bumped)
   std::map<std::string, Texture*> spriteTex_;
+
+  // Data-driven image entrance transitions. The image command is a friendly
+  // texture-node alias; keeping this state in the director leaves SpriteData
+  // serializable and lets ordinary node animations remain authoritative.
+  struct ImageTransition {
+    std::string type;
+    float duration = 0;
+    float elapsed = 0;
+  };
+  std::map<std::string, ImageTransition> imageTransitions_;
 
   // --- internals ---------------------------------------------------------------
   void buildSections();
@@ -311,6 +332,7 @@ private:
   void applySamples();
   void applySample(const AnimSample& s);
   void updateFade(float dt);
+  void updateImageTransitions(float dt);
   void pollLiveReload(const std::vector<std::string>& changed);
   void pushAudioUniforms(Effect* e);
 

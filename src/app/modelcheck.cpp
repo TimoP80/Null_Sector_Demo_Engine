@@ -9,7 +9,9 @@
 #include "framework/core/log.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -40,6 +42,30 @@ std::string cubeObj() {
       "f 1/1/5 4/2/5 8/3/5\nf 1/1/5 8/3/5 5/4/5\n"
       // +x
       "f 2/1/6 6/2/6 7/3/6\nf 2/1/6 7/3/6 3/4/6\n";
+}
+
+/** Small embedded GLB fixture: one triangle with POSITION + UNSIGNED_SHORT
+ * indices. It exercises the binary header/chunks, JSON accessors, indices,
+ * mesh upload, and the existing lit renderer without adding a repository asset. */
+std::vector<uint8_t> triangleGlb() {
+  std::string json = R"({"asset":{"version":"2.0"},"buffers":[{"byteLength":44}],"bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":6}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],"nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0})";
+  while (json.size() & 3u) json.push_back(' ');
+  std::vector<uint8_t> bin(44, 0);
+  const float pos[] = {-1, -1, 0, 1, -1, 0, 0, 1, 0};
+  const uint16_t idx[] = {0, 1, 2};
+  std::memcpy(bin.data(), pos, sizeof(pos));
+  std::memcpy(bin.data() + 36, idx, sizeof(idx));
+  std::vector<uint8_t> out;
+  const auto u32 = [&out](uint32_t v) {
+    out.push_back((uint8_t)(v & 255)); out.push_back((uint8_t)((v >> 8) & 255));
+    out.push_back((uint8_t)((v >> 16) & 255)); out.push_back((uint8_t)((v >> 24) & 255));
+  };
+  u32(0x46546C67u); u32(2); u32((uint32_t)(12 + 8 + json.size() + 8 + bin.size()));
+  u32((uint32_t)json.size()); u32(0x4E4F534Au);
+  out.insert(out.end(), json.begin(), json.end());
+  u32((uint32_t)bin.size()); u32(0x004E4942u);
+  out.insert(out.end(), bin.begin(), bin.end());
+  return out;
 }
 
 /** bounding sphere of a model, so the check camera always frames it */
@@ -193,10 +219,18 @@ ModelCheckResult checkModelPipeline() {
     check(cubeUploaded, "generated cube imports + uploads");
     if (!cubeUploaded) return r;
 
+    Model glb;
+    const bool glbOk = GlbImporter::loadBytes(triangleGlb(), glb);
+    const bool glbUploaded = glbOk && glb.meshes.size() == 1 &&
+                             glb.meshes[0].uploaded && glb.meshes[0].indexCount == 3;
+    check(glbUploaded, "embedded GLB imports + uploads");
+
     Material bright;  // visible under the check light
     bright.baseColor = {0.2f, 0.6f, 1.0f, 1.0f};
     bright.emission = {0.1f, 0.1f, 0.3f};
     check(drawAndReadback(mr, cube, bright, shared), "generated cube draws (pixel readback)");
+    if (glbUploaded)
+      check(drawAndReadback(mr, glb, bright, shared), "embedded GLB draws (pixel readback)");
 
     // 2. shipped demo models (the ones demo.nsd actually uses)
     const std::string data = AppAssets::dataDir();

@@ -5,9 +5,84 @@ All notable changes to the Null Sector Demo Engine are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] — 2026-08-09
 
 ### Added
+
+- **GLB model import** — `.glb` files now load through the existing model pipeline, including glTF 2.0 binary chunk validation, indexed POSITION/NORMAL/TEXCOORD geometry, triangle/strip/fan primitives, node transforms, and PBR base material factors. The editor model picker, asset browser, live-reload watcher, and model preflight now recognize `.glb` alongside `.obj`.
+- **NSD image nodes and transitions** — added the `image` scene-graph command as a texture-friendly alias for `sprite`, with one-argument (`image poster.png`) and explicit node/file forms. Images support data-driven `fade`, `crossfade`, `zoom`, and directional slide entrance transitions with configurable durations; packer, production checks, parser tests, and DSL documentation cover the feature.
+- **Editor NSD scene browser and authoring** — the Hierarchy now lists every scene declaration from the loaded `.nsd`, shows its scheduled start/end, and jumps the transport to a scene boundary when clicked. Selecting a scene opens an Inspector with editable title, bars, duration, intensity, chapter, visibility, and a multiline setup-command editor; metadata changes and applied setup edits are serialized through the document model with undo support.
+- **Editor project files** — File > "New Project (.nsd)..." creates a validated starter
+  production from scratch, while "Save Project As..." writes the current document to
+  a new `.nsd`, switches the active runtime project, and keeps timeline views separate
+  per file. `Ctrl+Shift+S` is the Save As shortcut; creating a new project warns before
+  discarding unsaved edits.
+- **Editor project loading + timeline fit** — File > "Load Project (.nsd)..." now opens
+  the native project picker and switches the editor only after the selected script
+  parses successfully. New projects open with the complete show fitted in the
+  timeline; the zoom range follows the production duration, the horizontal
+  scrollbar provides video-editor-style panning, and `F` / `Home` toggles fit-all
+  and the previous zoomed view. Timeline views remain persisted per project.
+- **Editor project packaging** — File > "Package Project..." creates a verified
+  `.nsp` asset package, copies the running engine as `<project>.exe`, writes a
+  `launch.bat` using `--play=<project>.nsp --fullscreen`, and emits a portable
+  ZIP distribution. The editor reuses the existing production dependency packer,
+  verifies the NSP hashes before archiving, and includes `NS_EDITOR_PACKAGE_SMOKE`
+  for an end-to-end packaging/playback check.
+- **Editor MP4 export** — File > "Export MP4..." in the demo editor
+  opens a save dialog (path, fps, audio mux toggle) and runs the capture
+  pipeline in-process: the show restarts at 0:00, one frame per capture
+  boundary is read back from the presented framebuffer and handed to a
+  background writer thread that pipes raw RGB into ffmpeg (H.264 + the
+  playing track muxed with `-shortest`, so the video is sample-accurately
+  synced and unsaved document edits are included). Live progress + cancel
+  in the dialog; a bounded buffer pool drops (and counts) frames when the
+  encoder falls behind instead of stalling the editor. The ffmpeg command
+  is now built by a shared framework helper (`framework/core/ffmpegpipe`),
+  also used by the CLI `--export-mp4` path. Smoke:
+  `NS_EDITOR_EXPORT_SMOKE=out.mp4` auto-starts an export at editor boot
+  (`NS_EDITOR_EXPORT_SECONDS` caps it) and prints an OK/FAIL verdict.
+- **Editor document model** — the editor now manipulates a real document
+  (the parsed `.nsd` AST, `src/editor/document.{hpp,cpp}`) instead of
+  editing raw text / runtime structures and reconstructing a script
+  afterwards. Authoring operations mutate the AST, mark it dirty, and either
+  push a lightweight live update to the runtime (keyframe drags) or commit
+  the document to disk + reload the show (save, add-scene, undo):
+  - `EditorDocument` — parsed `Script` AST + path + dirty state; `load` /
+    `adopt` / `serialize` / `save` / `write`, marker ops (add/remove/rename/
+    move with shared-block splitting) and `anim`-command queries
+  - **Undo / redo** (Ctrl+Z / Ctrl+Y, Edit menu) — snapshot-based, one undo
+    step per gesture (drags coalesce), no-op gestures skipped; dirty `*` in
+    the window title clears on Ctrl+S
+  - **`+ Scene` is a document op** — appends a `SceneDef` + activation block
+    to the AST, extends the header duration, writes the file and reloads
+    (replaces the raw text-append implementation)
+  - External reloads (file watcher / F2 / script switch) re-adopt the
+    document from the freshly parsed script, so the .nsd on disk stays the
+    source of truth
+- **NSD writer** — `src/framework/script/nsdwriter.{hpp,cpp}`: the inverse
+  of `ScriptParser::parse`. `nsdSerialize` round-trips every production
+  (demo.nsd, neural_dust.nsd, example.nsd) with exact float equality and
+  idempotent output; numbers print as their shortest exact decimal
+  (`77.8`, not `77.8000031`)
+- **Keyframe curve editor** (View > Curves) — a UI over the existing
+  AnimationSystem data (`anim` commands in the document): channel list,
+  draggable keys with multi-select, double-click to add (curve-sampled
+  value), Delete, copy/paste, per-key interpolator, beat/bar grid snap
+  (follows the scrub-quantize grid) and a live playhead; edits push a live
+  preview into the runtime animation library (`DemoApp::editorApplyAnim`)
+- **Inspector keyframe buttons** — a small keyframe diamond on the
+  Position / Rotation / Scale rows keyframes `node:<name>.<prop>` in the
+  active scene at the current scene-relative time and value
+- **First-class production markers** — markers are editable document
+  objects: click jumps the transport, drag moves (live preview, grid
+  snap), double-click opens an edit dialog (name / time / delete), all
+  undoable and persisted to the .nsd
+- **`NS_EDITOR_DOC_SMOKE`** — CI proof of the document pipeline inside the
+  running editor (add → undo → redo → write → runtime derivation)
+- **Framework tests** — NSD writer round-trip (structural equality +
+  idempotency, incl. the real productions) and `EditorDocument` marker
+  ops / dirty / undo — 690 checks total
 
 - **Virtual Filesystem (VFS)** — a GL-free abstraction under `src/framework/vfs/`
   that all runtime asset reads go through, so the same `.nsd` production runs
@@ -63,6 +138,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - **Documentation** — `docs/packaging.html` (VFS architecture, `.nsp` format,
   packing & playback, virtual path conventions, internals) linked from the
   docs nav, plus a VFS/packaging section in `README.md`
+- **MP4 export** — `--export-mp4=OUT.mp4` renders the show once (no loop) to an
+  H.264 MP4 in real time, piping the presented frame (RGB24, default framebuffer
+  before swap) into an ffmpeg process on stdin at a fixed capture rate
+  (`--export-fps`, default 60). The show clock stays audio-driven, so the video
+  is sample-accurately synced to the track, which ffmpeg muxes as a second input
+  (a package-internal track with no real path degrades to video-only with a
+  warning). Frame capture is boundary-based: a slow frame duplicates, never
+  drops, and the loop idle-paces to the next boundary. `--export-seconds=N`
+  caps the render for previews/CI; `--window=WxH` sets the resolution.
 
 ### Changed
 
@@ -75,6 +159,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- MP4 export frames were vertically flipped: `glReadPixels` returns rows
+  bottom-up (row 0 = image bottom) while ffmpeg rawvideo expects top-down.
+  Both the CLI `--export-mp4` and the editor's Export MP4 capture paths now
+  flip rows after readback via the shared `framework/core/ffmpegpipe::
+  flipRowsInPlace` (the BMP `--shot` path was unaffected - BMP is bottom-up
+  too). Verified end-to-end: an exported frame's row-brightness profile
+  correlates +0.999/+1.000 with a `--shot` reference frame.
 - Dev-tree track discovery walked nothing at the virtual root — `list("")` on
   the directory filesystem now resolves the catch-all mount (while unsafe
   paths like `../x` are still rejected)
@@ -86,6 +177,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
   2^64) — now checked overflow-safe against the file size
 - `verifyAll` reported a spurious short read for empty payloads (stale
   `gcount()` from the previous entry)
+- **NEURAL DUST frame drops** — the ocean reveal (`ndnet`) was a per-pixel
+  SDF raymarch at ~205 ms/frame (≈ 4 fps for ~40 s of the show). It is now a
+  geometry effect (`src/effects/network.cpp`, `shaders/nd_net.{vert,frag,
+  void.frag}`): 144 node point sprites + camera-facing synapse quads drawn
+  additively over the live particle ocean, node positions computed per-vertex
+  from the exact same wave field the raymarch used (~0.3 ms/frame, and the
+  below-network “void” look — base tint, traveling pulse glow, beat-locked
+  glitch tears — is preserved by a cheap fullscreen pass ported from the old
+  shader’s miss path). The core scene’s ambient node glow was gated to the
+  miss path (its own comment said “miss path only” — every hit pixel was
+  paying 56 exp()/sqrt() for a halo it can’t see): median 12.2 → 5.2 ms.
+  `ndboot`/`ndcore` renderScale moved 0.52/0.6 → 0.45/0.5 in
+  `data/neural_dust.nsd` (the failure-mode core already ran at 0.5). The
+  reveal now holds 60 fps; the core fly-through remains the scene’s heaviest
+  passage (inherent to the 56-node march from inside the shell).
 
 ## [0.1.0] — 2026-08-09
 

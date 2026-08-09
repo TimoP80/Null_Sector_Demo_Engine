@@ -15,7 +15,7 @@
 # miniaudio / stb are header-only, vendored in third_party/.
 # ---------------------------------------------------------------------------
 cmake_minimum_required(VERSION 3.20)
-project(NS_DemoEngine CXX)
+project(NS_DemoEngine VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,7 +35,10 @@ set(NS_DATA_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/data")
 # --- framework core (GL-free) ---------------------------------------------------
 add_library(ns_framework STATIC
   src/framework/core/json.cpp
+  src/framework/core/ffmpegpipe.cpp
   src/framework/script/scriptparser.cpp
+  src/framework/script/nsdwriter.cpp
+  src/editor/document.cpp
   src/framework/script/scriptengine.cpp
   src/framework/timeline/timelineeditor.cpp
   src/framework/anim/animation.cpp
@@ -127,6 +130,7 @@ if(NS_BUILD_APP)
     # effects (registered content)
     src/effects/greetings.cpp
     src/effects/intro.cpp
+    src/effects/network.cpp
     src/effects/scene.cpp
     src/effects/splash.cpp
     src/effects/tunnel.cpp
@@ -144,6 +148,13 @@ if(NS_BUILD_APP)
     src/app/demoapp.cpp
     # editor (dockable ImGui shell)
     src/editor/editor.cpp
+    src/editor/document.cpp
+    src/editor/editor_document.cpp
+    src/editor/editor_curves.cpp
+    src/editor/editor_markers.cpp
+    src/editor/editor_export.cpp
+    src/editor/packaging.cpp
+    src/editor/exportmp4.cpp
   )
   target_include_directories(ns_demo PRIVATE third_party)
   target_link_libraries(ns_demo PRIVATE ns_framework glfw imgui)
@@ -153,7 +164,7 @@ if(NS_BUILD_APP)
     NULLSECTOR_DATA_DIR="${NS_DATA_DIR}"
   )
   if(WIN32)
-    target_link_libraries(ns_demo PRIVATE opengl32)
+    target_link_libraries(ns_demo PRIVATE opengl32 comdlg32)
   elseif(UNIX AND NOT APPLE)
     find_package(X11 QUIET)
     target_link_libraries(ns_demo PRIVATE ${CMAKE_DL_LIBS})

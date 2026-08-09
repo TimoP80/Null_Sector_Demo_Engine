@@ -119,13 +119,14 @@ at 64.4 { show Shadertoy; marker Imported }</pre>
               <tr><td><code>play</code></td><td><code>play music</code></td><td>Start the track.</td></tr>
               <tr><td><code>fade</code></td><td><code>fade in 2</code>, <code>fade out 2</code></td><td>Fade from / to black over N seconds.</td></tr>
               <tr><td><code>transition</code></td><td><code>transition fade 1</code></td><td>Scene transition shader over N seconds.</td></tr>
+              <tr><td><code>image</code></td><td><code>image poster poster.png { transition fade; duration 1 }</code></td><td>Display a texture node with a per-image entrance transition: <code>fade</code>, <code>crossfade</code>, <code>zoom</code>, or <code>slide-left/right/up/down</code>.</td></tr>
               <tr><td><code>post</code></td><td><code>post preset cinematic</code>, <code>post legacy</code>, <code>post { key v }</code></td><td>Switch the post-processing chain (see <a href="postfx.html">Post FX</a>).</td></tr>
               <tr><td><code>anim</code></td><td><code>anim camOrbit camera.pos smooth { 0 (0,1.2,7); 4 (2.4,1.6,5) }</code></td><td>Define &amp; play a keyframed animation (see <a href="animation.html">Animation</a>).</td></tr>
               <tr><td><code>marker</code></td><td><code>marker Awakening</code></td><td>Drop a named cue on the timeline (scrubbing, rehearsal).</td></tr>
               <tr><td><code>speed</code></td><td><code>speed 0.5</code></td><td>Scale the show clock.</td></tr>
               <tr><td><code>loop</code></td><td><code>loop section</code></td><td>Toggle looping (whole show or current section).</td></tr>
               <tr><td><code>jump</code></td><td><code>jump 40</code></td><td>Seek the timeline to an absolute time.</td></tr>
-              <tr><td><code>mesh</code> / <code>sprite</code> / <code>text</code> / <code>light</code> / <code>particles</code> / <code>empty</code></td><td><code>mesh gem { model gem.obj; material neon; pos (2.2,1.4,0) }</code></td><td>Build a scene-graph node (see <a href="scene.html">Scene Graph</a>).</td></tr>
+              <tr><td><code>mesh</code> / <code>sprite</code> / <code>image</code> / <code>text</code> / <code>light</code> / <code>particles</code> / <code>empty</code></td><td><code>mesh gem { model gem.obj; material neon; pos (2.2,1.4,0) }</code></td><td>Build a scene-graph node (see <a href="scene.html">Scene Graph</a>).</td></tr>
             </tbody>
           </table>
         </div>

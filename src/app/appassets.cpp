@@ -38,7 +38,7 @@ void AppAssets::init(AssetManager& am) {
         return true;
       });
 
-  // model: OBJ -> Model
+  // model: OBJ or GLB -> Model
   am.registerKind(
       "model",
       [](const std::string& path) -> void* { return loadModel(path); },

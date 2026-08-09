@@ -4,6 +4,7 @@
 #include "app/shadertoy.hpp"
 #include "effects/greetings.hpp"
 #include "effects/intro.hpp"
+#include "effects/network.hpp"
 #include "effects/scene.hpp"
 #include "effects/tunnel.hpp"
 #include "engine/assets.hpp"
@@ -111,7 +112,7 @@ void DemoApp::init(const Input& in) {
 
   // live reload watcher: shaders + data + assets
   watcher_.add(AppAssets::shaderDir(), {".vert", ".frag", ".glsl"});
-  watcher_.add(dataDir(), {".nsd", ".json", ".glsl", ".obj", ".png", ".jpg", ".mtl"});
+  watcher_.add(dataDir(), {".nsd", ".json", ".glsl", ".obj", ".glb", ".png", ".jpg", ".mtl"});
   watcher_.add(resolveRuntimeDir("NULLSECTOR_ASSET_DIR", NULLSECTOR_ASSET_DIR, "assets"),
                {".png", ".jpg", ".ttf"});
   watcher_.poll();  // baseline
@@ -184,6 +185,7 @@ void DemoApp::update(float show, float dt) {
     fadeAlpha_ = 0;
     fadeGoal_ = 0;
     transitionT_ = -1;
+    imageTransitions_.clear();
   } else if (in_.directorPaused && *in_.directorPaused) {
     editor_.pause();
     if (std::fabs(editor_.time - show) > 0.01f) catchUpSeek(show);
@@ -217,6 +219,7 @@ void DemoApp::update(float show, float dt) {
 
   // fades / transitions
   updateFade(dt);
+  updateImageTransitions(dt);
 
   // audio uniforms for data-driven effects
   audioUniforms_.bass = in_.audio->react.bass.load();
@@ -423,7 +426,7 @@ void DemoApp::dispatch(const Cmd& cmd, float at) {
     toggleLoop();
   } else if (n == "jump") {
     if (!cmd.args.empty()) seek(cmd.args[0].asFloat(0));
-  } else if (n == "mesh" || n == "sprite" || n == "text" || n == "light" ||
+  } else if (n == "mesh" || n == "sprite" || n == "image" || n == "text" || n == "light" ||
              n == "particles" || n == "empty" || n == "postnode" || n == "quadnode") {
     cmdSceneNode(cmd);
   } else {
@@ -532,13 +535,18 @@ void DemoApp::activateScene(const std::string& name) {
 // scene graph building
 // ---------------------------------------------------------------------------
 void DemoApp::cmdSceneNode(const Cmd& cmd) {
+  const bool imageCmd = cmd.name == "image";
   std::string nodeName = cmd.args.empty() ? cmd.name : cmd.args[0].asStr();
-  if (cmd.name == "mesh" && nodeName.rfind('.') != std::string::npos) {
-    nodeName = std::filesystem::path(nodeName).stem().string();  // file.obj -> file
+  if (imageCmd && cmd.opts.get("tex").isNull() && cmd.args.size() == 1) {
+    // Convenient one-argument form: `image poster.png` creates node `poster`.
+    nodeName = std::filesystem::path(cmd.args[0].asStr()).stem().string();
+  }
+  if ((cmd.name == "mesh" || imageCmd) && nodeName.rfind('.') != std::string::npos) {
+    nodeName = std::filesystem::path(nodeName).stem().string();  // file.ext -> file
   }
   NodeType type = NodeType::Empty;
   if (cmd.name == "mesh") type = NodeType::Mesh;
-  else if (cmd.name == "sprite") type = NodeType::Sprite;
+  else if (cmd.name == "sprite" || imageCmd) type = NodeType::Sprite;
   else if (cmd.name == "text") type = NodeType::Text;
   else if (cmd.name == "light") type = NodeType::Light;
   else if (cmd.name == "particles") type = NodeType::Particles;
@@ -572,11 +580,29 @@ void DemoApp::cmdSceneNode(const Cmd& cmd) {
     }
     case NodeType::Sprite: {
       SpriteData sd;
-      sd.tex = cmd.opts.get("tex").asStr(cmd.args.empty() ? "" : cmd.args[0].asStr());
+      std::string tex = cmd.opts.get("tex").asStr();
+      if (tex.empty()) {
+        if (imageCmd && cmd.args.size() >= 2) tex = cmd.args[1].asStr();
+        else if (!cmd.args.empty()) tex = cmd.args[0].asStr();
+      }
+      sd.tex = tex;
       if (cmd.opts.get("color").toFloats(f, 4) == 4) sd.color = {f[0], f[1], f[2], f[3]};
       sd.opacity = cmd.opts.get("opacity").asFloat(1);
       if (cmd.opts.get("size").toFloats(f, 3) == 3) sd.size = {f[0], f[1], f[2]};
       node->payload = sd;
+
+      // Image transitions are deliberately data-driven and cheap: they only
+      // affect this textured quad, unlike `transition fade`, which covers the
+      // whole presented scene. Supported forms are fade, crossfade, zoom and
+      // slide-left/right/up/down. `transition none` disables the entrance.
+      const std::string transition = cmd.opts.get("transition").asStr("none");
+      const float duration = cmd.opts.get("duration").asFloat(
+          cmd.opts.get("transitionDuration").asFloat(transition == "none" ? 0.0f : 1.0f));
+      if (imageCmd && transition != "none" && duration > 0.0f) {
+        imageTransitions_[nodeName] = {transition, duration, 0.0f};
+      } else if (imageCmd) {
+        imageTransitions_.erase(nodeName);
+      }
       break;
     }
     case NodeType::Text: {
@@ -758,6 +784,14 @@ void DemoApp::loadPreset(const std::string& name) {
   Log::info("POST", "preset '" + name + "' active: " + chain);
 }
 
+void DemoApp::updateImageTransitions(float dt) {
+  for (auto it = imageTransitions_.begin(); it != imageTransitions_.end();) {
+    it->second.elapsed += std::max(0.0f, dt);
+    if (it->second.elapsed >= it->second.duration) it = imageTransitions_.erase(it);
+    else ++it;
+  }
+}
+
 void DemoApp::updateFade(float dt) {
   if (transitionT_ >= 0) {
     transitionT_ += dt;
@@ -839,10 +873,12 @@ void DemoApp::reloadScript() {
     buildSections();
     activeScene_.clear();
     activeEffects_.clear();
+    imageTransitions_.clear();
     catchUpFloor_ = -1e9f;
     editor_.seek(0);
     editor_.play();
     Log::info("RELOAD", "script reloaded: " + in_.scriptPath);
+    ++reloadCount_;
   } catch (const std::exception& e) {
     Log::error("RELOAD", std::string("script reload failed: ") + e.what());
   }
@@ -1221,6 +1257,34 @@ void DemoApp::renderSpritesAndText() {
         out[c * 4 + 2] = m[c * 4 + 2] * sz;
         out[c * 4 + 3] = m[c * 4 + 3];
       }
+
+      float transitionAlpha = 1.0f;
+      auto tr = imageTransitions_.find(n->name);
+      if (tr != imageTransitions_.end()) {
+        const ImageTransition& t = tr->second;
+        const float raw = std::max(0.0f, std::min(1.0f, t.elapsed / t.duration));
+        const float p = raw * raw * (3.0f - 2.0f * raw);  // smoothstep
+        const std::string& kind = t.type;
+        if (kind == "fade" || kind == "fade-in" || kind == "crossfade") {
+          transitionAlpha = p;
+        } else if (kind == "zoom" || kind == "zoom-in") {
+          const float s = 0.72f + 0.28f * p;
+          for (int c = 0; c < 3; c++) {
+            out[c * 4 + 0] *= s;
+            out[c * 4 + 1] *= s;
+            out[c * 4 + 2] *= s;
+          }
+          transitionAlpha = p;
+        } else if (kind == "slide-left" || kind == "slide-right" ||
+                   kind == "slide-up" || kind == "slide-down") {
+          const float distance = 1.35f * (1.0f - p);
+          if (kind == "slide-left") out[12] -= distance;
+          else if (kind == "slide-right") out[12] += distance;
+          else if (kind == "slide-up") out[13] += distance;
+          else out[13] -= distance;
+          transitionAlpha = p;
+        }
+      }
       spriteProg_.setMat4("uModel", out.data());
       if (tex && tex->tex) {
         ::glActiveTexture(::gl::TEXTURE0);
@@ -1228,7 +1292,7 @@ void DemoApp::renderSpritesAndText() {
       }
       spriteProg_.set1i("uTex", 0);
       spriteProg_.set4f("uColor", sd->color[0], sd->color[1], sd->color[2], sd->color[3]);
-      spriteProg_.set1f("uOpacity", sd->opacity);
+      spriteProg_.set1f("uOpacity", sd->opacity * transitionAlpha);
       spriteQuad_.draw(6);
     }
     ::glDisable(::gl::BLEND);
@@ -1371,6 +1435,11 @@ PerfView perfViewOf(Effect* e) {
     v.context = "count " + std::to_string(psx->count());
     v.emaMs = psx->emaMs();
     v.rawMs = psx->lastRawMs();
+  } else if (auto* nfx = dynamic_cast<NetworkFX*>(e)) {
+    v.kind = "network";
+    v.context = "nodes 144";
+    v.emaMs = nfx->emaMs();
+    v.rawMs = nfx->lastRawMs();
   }
   return v;
 }

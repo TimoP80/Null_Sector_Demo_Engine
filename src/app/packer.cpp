@@ -60,8 +60,12 @@ void collectCmdRefs(const Cmd& c, std::vector<PackRef>& out) {
   } else if (c.name == "mesh") {
     const std::string model = c.s("model", c.args.empty() ? "" : c.args[0].asStr());
     if (!model.empty()) out.push_back({"data/models/" + model, "model"});
-  } else if (c.name == "sprite") {
-    const std::string tex = c.s("tex", c.args.empty() ? "" : c.args[0].asStr());
+  } else if (c.name == "sprite" || c.name == "image") {
+    std::string tex = c.s("tex");
+    if (tex.empty()) {
+      if (c.name == "image" && c.args.size() >= 2) tex = c.args[1].asStr();
+      else if (!c.args.empty()) tex = c.args[0].asStr();
+    }
     if (!tex.empty()) out.push_back({"data/textures/" + tex, "texture"});
   }
 }

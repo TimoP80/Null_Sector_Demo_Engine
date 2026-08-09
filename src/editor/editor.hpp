@@ -27,12 +27,19 @@
 #include "engine/timeline.hpp"
 #include "framework/core/json.hpp"  // Value: panel-visibility persistence
 #include "framework/script/scriptparser.hpp"  // beatSec()
+#include "editor/document.hpp"            // EditorDocument (AST + undo)
+#include "editor/exportmp4.hpp"           // Mp4Export (File > Export MP4...)
+#include "editor/packaging.hpp"            // project NSP/ZIP distribution
 
 #include <GLFW/glfw3.h>
 #include <string>
 #include <vector>
 
 namespace ns {
+
+/** small keyframe button drawn with the draw list (the default ImGui font
+ *  has no diamond glyph); used by the inspector to keyframe a property row */
+bool editorKeyframeButton(const char* id);
 
 class DemoEditor {
 public:
@@ -103,6 +110,18 @@ private:
   SceneNode* selNode_ = nullptr;
   std::string selEffect_;
   std::string selAsset_;
+  std::string selScene_;       // selected declaration from the loaded .nsd
+  char sceneFilter_[96] = "";
+  char sceneTitleBuf_[256] = "";
+  std::vector<char> sceneSetupBuf_;  // editable setup command source
+  std::string sceneEditScene_;       // scene represented by the buffers
+  bool sceneSetupDirty_ = false;
+
+  void drawSceneList();
+  void inspectScene();
+  void loadSceneEditorBuffers();
+  bool applySceneSetup();
+
 
   // timeline view
   float tlZoom_ = 75.0f;     // visible seconds
@@ -137,6 +156,8 @@ private:
   char assetName_[64] = "";
   bool assetCreated_ = false;
   std::string assetCreatedPath_;  // full path of the last created asset
+  bool newProjectConfirmOpen_ = false;
+  std::string pendingNewProjectPath_;
 
   // NS_EDITOR_SCENE_SMOKE=1: programmatic Add Scene (queue -> append -> reload
   // -> land on the new section) so CI can prove the button's data path without
@@ -176,9 +197,10 @@ private:
   // One modal ("Open Asset") serves every file category - audio, texture,
   // shader, model, script - with per-kind scan roots, extensions and actions.
   // Each kind remembers its own scan root + last pick in editor_state.json
-  // (browsers.<key>), so every picker reopens where you were. No native
-  // file-dialog dependency (cross-platform). Roots + picks are stored as
-  // absolute paths, consistent with the persisted track.
+  // (browsers.<key>), so every picker reopens where you were. Menu and
+  // Browse... actions use the platform picker on Windows, with the existing
+  // in-editor browser retained as a cross-platform fallback. Roots + picks
+  // are stored as absolute paths, consistent with the persisted track.
   enum class BrowseKind : int { Audio, Texture, Shader, Model, Script, Count };
   struct AssetBrowse {
     bool scanned = false;   // listed once per kind (Rescan forces it)
@@ -193,7 +215,9 @@ private:
   bool browseWasOpen_ = false;  // close-edge detection (persist on close)
   int browseKind_ = 0;          // kind the modal shows (persisted)
   AssetBrowse browse_[(int)BrowseKind::Count];  // per-kind state
-  void openBrowse(int kind);          // open the popup on a category
+  void openBrowse(int kind);          // open the in-editor browser on a category
+  /** open the platform file picker; falls back to the in-editor browser when unavailable */
+  bool openNativeFileDialog(int kind);
   /** open the popup rooted at ROOT (a dropped folder), listing that folder */
   void openBrowseRoot(int kind, const std::string& root);
   void scanAssetBrowser(int kind);    // (re)list files under the kind's root
@@ -368,6 +392,103 @@ private:
   bool audioSmokeDone_ = false;
   double audioSmokeT_ = 0;
 
+  // --- document model + authoring (editor_document.cpp) ---------------------
+  EditorDocument doc_;          // the production document (parsed AST + dirty)
+  uint64_t docReloadSeen_ = 0;  // app->reloadCount() at the last adopt
+  std::string lastTitle_;       // last window title set (dirty-flag updates)
+  void initDocument();          // adopt the app's parsed script at boot
+  void syncDocumentFromApp();   // re-adopt when an EXTERNAL reload happened
+  /** serialize the document to its .nsd + reload the show (clears dirty:
+   *  the file now matches the document) */
+  bool writeDocument();
+  bool writeDocumentAs(const std::string& path);
+  void saveDocument();          // Ctrl+S
+  void saveDocumentAsDialog();  // Ctrl+Shift+S / File > Save Project As
+  void newProjectDialog();      // File > New Project
+  bool createNewProject(const std::string& path);
+  void undoDocument();          // Ctrl+Z
+  void redoDocument();          // Ctrl+Y
+  void addSceneViaDocument();   // "+ Scene" as a document op
+  /** NS_EDITOR_DOC_SMOKE=1: prove the document pipeline inside the running
+   *  editor (add -> undo -> redo -> write -> runtime derivation) */
+  void runDocSmoke(float dt);
+  bool smokeDoc_ = false;
+  bool docSmokeDone_ = false;
+  bool docSmokePhase2_ = false;
+  bool docSmokeOk_ = true;
+  double docSmokeT_ = 0;
+  std::string docDisplayName() const;  // "demo.nsd" / "demo.nsd *"
+
+  // --- curve editor (editor_curves.cpp) -------------------------------------
+  bool showCurves_ = false;     // View > Curves panel
+  std::vector<Cmd*> curveCmds_; // doc_.animCmds() cached per frame
+  int curveSel_ = -1;           // index into curveCmds_ (-1 = none)
+  std::vector<int> selKeys_;    // selected key indices in the channel
+  int dragKey_ = -1;            // key index being dragged (-1 = none)
+  std::vector<float> dragOrigT_; // original key times at drag start (multi)
+  std::vector<float> dragOrigV_; // original first-component values (multi)
+  float dragKeyT0_ = 0, dragKeyV0_ = 0;  // dragged key's original t/v
+  bool keyDragging_ = false;
+  struct CurveClipKey { float t; Value v; std::string interp; };
+  std::vector<CurveClipKey> curveClip_;
+  void drawCurveEditor();
+  void rebuildCurveList();
+  void applyChannelToRuntime(Cmd& c);  // live preview via editorApplyAnim
+  /** inspector keyframe button: keyframe node:<name>.<prop> in the active
+   *  scene's setup at the current scene-relative time + value */
+  void keyframeNodeProperty(SceneNode* n, const char* prop);
+  /** snap a key time to the beat/bar grid (quantize_) or 1/60 s */
+  float snapKeyTime(float t) const;
+
+  // --- production markers (editor_markers.cpp) -------------------------------
+  std::string markerEditName_;      // marker being edited ("" = dialog closed)
+  char markerEditNameBuf_[64] = "";
+  char markerEditTimeBuf_[32] = "";
+  bool markerDragging_ = false;
+  std::string markerDragName_;
+  float markerDragT0_ = 0;          // marker time at drag start
+  void drawMarkerEditDialog();
+  void openMarkerEdit(const std::string& name);
+  void markerDragBegin(const std::string& name);
+  void markerDragMove(const std::string& name, float t);
+  void markerDragEnd();
+
+  // --- project packaging (packaging.cpp) -----------------------------------
+  bool packageDialogOpen_ = false;
+  bool packageHasResult_ = false;
+  bool packageOk_ = false;
+  char packageZipPath_[512] = "";
+  std::string packageMessage_;
+  void openPackageDialog();
+  void startPackage(const std::string& outputZip);
+  void drawPackageDialog();
+
+  // --- MP4 export (editor_export.cpp) -------------------------------------
+  bool exportDialogOpen_ = false;
+  char exportPath_[512] = "";
+  float exportFps_ = 60.0f;
+  bool exportAudio_ = true;
+  float exportElapsed_ = 0.0f;    // seconds captured so far
+  double exportNextT_ = 0.0;      // next capture boundary (show seconds)
+  Mp4Export export_;
+  void openExportDialog();
+  void startExport(const std::string& path, const std::string& audioOverride = "");
+  void cancelExport();
+  void pumpExport(float dt, int fbW, int fbH);
+  void drawExportDialog();
+  void onExportFinished();
+  // export smoke (NS_EDITOR_EXPORT_SMOKE=path [NS_EDITOR_EXPORT_SECONDS=n]):
+  // auto-starts an export at boot so CI can prove the capture pipeline
+  bool smokeExport_ = false;
+  std::string smokeExportPath_, smokeAudioPath_;
+  // NS_EDITOR_PACKAGE_SMOKE=path.zip: package the loaded project at boot and
+  // print a machine-readable verdict for CI without opening the menu.
+  bool smokePackage_ = false;
+  bool smokePackageStarted_ = false;
+  std::string smokePackagePath_;
+  float smokeExportSeconds_ = 3.0f;
+  bool smokeExportStarted_ = false;
+
   // --- impl -----------------------------------------------------------------
   void initImGui();
   void applyTheme();
@@ -381,8 +502,8 @@ private:
 
   // queued authoring ops (frame start, before the engine step)
   void applyQueuedActions();
-  void addScene();
   void drawNewAssetDialog();
+  void drawNewProjectConfirm();
   void drawAudioPopup();
   void rescanAudioCandidates();
   void applyAudioTrack(const std::string& path);

@@ -28,8 +28,15 @@ cmake --build build --config Release
 ./build/Release/ns_demo.exe
 ./build/Release/ns_demo.exe --demo=data/examples/ExampleDemo.nsd
 
-# open the editor (timeline, viewport, inspector, audio, drops…)
+# open the editor (document + undo, curves, markers, timeline, drops…)
+# Ctrl+S saves the .nsd document, Ctrl+Z / Ctrl+Y undo / redo
 ./build/Release/ns_demo.exe --editor
+
+# ...or from inside the editor: File > Export MP4... (save dialog + live progress)
+#   (captures the current window resolution; resize the window to change it)
+# export the show to an MP4 (real-time, music-synced; ffmpeg must be on PATH)
+./build/Release/ns_demo.exe --demo=data/demo.nsd --windowed --window=1920x1080 \
+    --export-mp4=ghost.mp4
 ```
 
 GLFW is found via `find_package(glfw3)` and fetched from GitHub at configure
@@ -47,7 +54,8 @@ src/
               scene graph, camera rigs, JSON, assets, file watcher, logging
   effects/    built-in effects: intro, greetings, scene, splash, tunnel…
   app/        DemoApp director, effect registry, shadertoy importer, prodcheck
-  editor/     Dear ImGui demo editor (timeline, hierarchy, inspector, drops)
+  editor/     Dear ImGui demo editor (document model + undo, keyframe curves,
+              markers, timeline, hierarchy, inspector, asset drops)
   main.cpp    thin shell: flags, window, render loop
 shaders/      engine + production shaders
 assets/       fonts, textures
@@ -78,7 +86,7 @@ at bar 4 { show Plasma; marker Plasma }         // bar/beat units ("bar 12",
 Commands: `show`/`hide`, `load` (shadertoy / model / material / plugin /
 effect), `shader FILE`, `camera NAME { rig … }`, `play`, `fade in|out`,
 `transition`, `post { … }` (or scene sugar like `bloom 0.8`), `anim`, `marker`,
-`speed`, `loop`, `jump`, and scene-graph nodes (`mesh`/`sprite`/`text`/`light`/
+`speed`, `loop`, `jump`, and scene-graph nodes (`mesh`/`sprite`/`image`/`text`/`light`/
 `particles`/`empty`). Times accept seconds, `mm:ss`, or bar/beat units resolved
 against the header tempo. Parameters can be keyframed:
 

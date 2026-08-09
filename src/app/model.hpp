@@ -8,8 +8,8 @@
 //                 scene graph's light nodes (up to 4), into a depth-enabled
 //                 target that the DemoApp composites over the HDR scene.
 //
-// Assimp-based glTF/GLB/FBX/DAE import plugs into the same Model data
-// structure (the interface is the importer, not the renderer).
+// GlbImporter handles the self-contained glTF 2.0 binary subset used by
+// production assets and plugs into the same Model data structure.
 // ---------------------------------------------------------------------------
 #pragma once
 
@@ -20,6 +20,7 @@
 #include "app/shadermanager.hpp"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -62,7 +63,19 @@ struct Model {
   std::vector<MeshPrimitive> meshes;
 };
 
-/** minimal OBJ importer (v / vt / vn / f with v, v/vt, v//vn, v/vt/vn) */
+/** glTF 2.0 binary importer: geometry, node transforms, and PBR base material data.
+ * Embedded image textures are intentionally left for the existing texture
+ * pipeline; models still render correctly with their embedded material colors. */
+class GlbImporter {
+public:
+  static bool load(const std::string& path, Model& out);
+  static bool loadBytes(const std::vector<uint8_t>& bytes, Model& out,
+                        const std::string& label = "");
+};
+
+/** minimal OBJ importer (v / vt / vn / f with v, v/vt, v//vn, v/vt/vn).
+ * The file loader also dispatches .glb files to GlbImporter so existing
+ * `mesh foo.glb` script commands and the AssetManager model kind keep working. */
 class ObjImporter {
 public:
   /** load an OBJ file (virtual path through the runtime VFS, with a direct

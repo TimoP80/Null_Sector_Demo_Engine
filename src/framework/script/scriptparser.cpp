@@ -232,7 +232,7 @@ const std::vector<std::string> kPostOptions = {"bloom", "glitch", "exposure", "h
                                                "chromatic", "pixelate", "fog", "motionblur"};
 const std::vector<std::string> kCommands = {
     "show", "hide", "load", "shader", "camera", "play", "fade", "transition", "post",
-    "anim", "marker", "speed", "loop", "jump", "mesh", "sprite", "text", "light",
+    "anim", "marker", "speed", "loop", "jump", "mesh", "sprite", "image", "text", "light",
     "particles", "empty", "postnode", "quadnode"};
 const std::vector<std::string> kInterps = {"linear", "smooth", "smoothstep", "cubic", "bezier",
                                            "ease-in", "ease-out", "ease-in-out", "bounce", "elastic"};

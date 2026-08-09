@@ -26,3 +26,7 @@ perf*.json
 
 # --- Packaged productions (generated) ---
 *.nsp
+*.zip
+
+# --- Video exports (--export-mp4, editor Export MP4) ---
+*.mp4

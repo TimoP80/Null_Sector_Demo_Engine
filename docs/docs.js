@@ -181,7 +181,7 @@
   /* --- syntax highlighting -------------------------------------------------- */
   var KEYWORDS = ["demo","scene","at","camera","show","hide","load","shader","play",
     "fade","transition","post","preset","legacy","anim","marker","speed","loop","jump",
-    "mesh","sprite","text","light","particles","empty","rig","static","drift","fly",
+    "mesh","sprite","image","text","light","particles","empty","rig","static","drift","fly",
     "nave","orbit","spiral","hover","city","descend","path","bpm","duration","bars",
     "intensity","chapter","title","music","if","else","for","while","return","break",
     "continue","const","uniform","in","out","inout","struct","true","false","precision",

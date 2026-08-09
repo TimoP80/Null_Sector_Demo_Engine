@@ -2,6 +2,7 @@
 #include "app/shadertoy.hpp"
 #include "effects/greetings.hpp"
 #include "effects/intro.hpp"
+#include "effects/network.hpp"
 #include "effects/scene.hpp"
 #include "effects/tunnel.hpp"
 #include "framework/core/log.hpp"
@@ -121,10 +122,9 @@ void registerBuiltinEffects() {
     return e;
   });
   registerEffect("ndnet", [](const Value& p) {
-    auto e = std::make_unique<SceneFX>("nd_net.frag", /*handoff=*/true);
+    auto e = std::make_unique<NetworkFX>();
     e->mode = p.get("mode").asFloat(0);
-    e->renderScale = p.get("renderScale").asFloat(0.6f);
-    return e;
+    return e;   // geometry network (nd_net.vert/frag) - renderScale unused
   });
   registerEffect("ndlogo", [](const Value& p) {
     auto e = std::make_unique<SceneFX>("nd_logo.frag");

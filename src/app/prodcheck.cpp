@@ -187,15 +187,23 @@ ProdCheckResult checkProduction(const std::string& scriptPath,
       const std::string model = c.opts.get("model").asStr(c.args.empty() ? "" : c.args[0].asStr());
       if (!model.empty())
         chk.c(fileExists(dataDir + "/models/" + model), "mesh model '" + model + "'");
-    } else if (c.name == "sprite") {
-      const std::string tex = c.opts.get("tex").asStr(c.args.empty() ? "" : c.args[0].asStr());
+    } else if (c.name == "sprite" || c.name == "image") {
+      std::string tex = c.opts.get("tex").asStr();
+      if (tex.empty()) {
+        if (c.name == "image" && c.args.size() >= 2) tex = c.args[1].asStr();
+        else if (!c.args.empty()) tex = c.args[0].asStr();
+      }
       if (!tex.empty())
-        chk.c(fileExists(dataDir + "/textures/" + tex), "sprite texture '" + tex + "'");
+        chk.c(fileExists(dataDir + "/textures/" + tex),
+              std::string(c.name == "image" ? "image" : "sprite") + " texture '" + tex + "'");
     }
   };
 
-  for (const auto& b : se.scenes())
+  for (const auto& b : se.scenes()) {
     for (const auto& c : b.setup) checkCmd(c);
+    for (const auto& blk : b.blocks)
+      for (const auto& c : blk.cmds) checkCmd(c);
+  }
   for (const auto& blk : sc.main)
     for (const auto& c : blk.cmds) checkCmd(c);
 

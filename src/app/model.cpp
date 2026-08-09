@@ -1,13 +1,17 @@
 #include "app/model.hpp"
 #include "framework/vfs/vfs.hpp"
 #include "engine/math.hpp"
+#include "framework/core/json.hpp"
 #include "framework/core/log.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <sstream>
 
@@ -126,7 +130,358 @@ struct ObjFace {
 };
 }  // namespace
 
+namespace {
+
+struct GlbAccessor {
+  int view = -1;
+  size_t offset = 0;
+  size_t count = 0;
+  int componentType = 0;
+  int components = 1;
+  bool normalized = false;
+  size_t stride = 0;
+};
+
+int glbComponentSize(int type) {
+  switch (type) {
+    case 5120: case 5121: return 1;  // BYTE / UNSIGNED_BYTE
+    case 5122: case 5123: return 2;  // SHORT / UNSIGNED_SHORT
+    case 5125: case 5126: return 4;  // UNSIGNED_INT / FLOAT
+    default: return 0;
+  }
+}
+
+int glbComponentCount(const std::string& type) {
+  if (type == "SCALAR") return 1;
+  if (type == "VEC2") return 2;
+  if (type == "VEC3") return 3;
+  if (type == "VEC4") return 4;
+  if (type == "MAT2") return 4;
+  if (type == "MAT3") return 9;
+  if (type == "MAT4") return 16;
+  return 0;
+}
+
+bool glbRange(size_t offset, size_t size, size_t total) {
+  return offset <= total && size <= total - offset;
+}
+
+bool glbAccessor(const Value& root, const std::vector<uint8_t>& bin, int index,
+                 GlbAccessor& out, std::string& err) {
+  const Value& accessors = root.get("accessors");
+  const Value& views = root.get("bufferViews");
+  const Value& a = accessors.atIndex(index < 0 ? (size_t)-1 : (size_t)index);
+  if (!a.isObj()) { err = "accessor index out of range"; return false; }
+  out.view = a.get("bufferView").asInt(-1);
+  out.offset = (size_t)std::max(0, a.get("byteOffset").asInt(0));
+  out.count = (size_t)std::max(0, a.get("count").asInt(0));
+  out.componentType = a.get("componentType").asInt(0);
+  out.components = glbComponentCount(a.get("type").asStr());
+  out.normalized = a.get("normalized").asBool(false);
+  const int componentSize = glbComponentSize(out.componentType);
+  if (out.view < 0 || out.components == 0 || componentSize == 0 ||
+      out.count == 0) {
+    err = "unsupported or empty accessor";
+    return false;
+  }
+  const Value& v = views.atIndex((size_t)out.view);
+  if (!v.isObj()) { err = "bufferView index out of range"; return false; }
+  const size_t viewOffset = (size_t)std::max(0, v.get("byteOffset").asInt(0));
+  const size_t viewLength = (size_t)std::max(0, v.get("byteLength").asInt(0));
+  out.stride = (size_t)std::max(0, v.get("byteStride").asInt(0));
+  const size_t elementSize = (size_t)componentSize * (size_t)out.components;
+  if (out.stride == 0) out.stride = elementSize;
+  if (out.stride < elementSize || viewOffset > bin.size() ||
+      viewLength > bin.size() - viewOffset ||
+      out.count > 0 && (out.count - 1) > (SIZE_MAX - out.offset - elementSize) / out.stride ||
+      out.offset + (out.count - 1) * out.stride + elementSize > viewLength) {
+    err = "accessor exceeds binary bufferView";
+    return false;
+  }
+  out.offset += viewOffset;
+  return true;
+}
+
+float glbComponent(const uint8_t* p, int type, bool normalized) {
+  switch (type) {
+    case 5126: {
+      float v = 0; std::memcpy(&v, p, sizeof(v)); return v;
+    }
+    case 5120: {
+      int8_t v = 0; std::memcpy(&v, p, sizeof(v));
+      return normalized ? std::max(-1.0f, (float)v / 127.0f) : (float)v;
+    }
+    case 5121: {
+      uint8_t v = *p; return normalized ? (float)v / 255.0f : (float)v;
+    }
+    case 5122: {
+      int16_t v = 0; std::memcpy(&v, p, sizeof(v));
+      return normalized ? std::max(-1.0f, (float)v / 32767.0f) : (float)v;
+    }
+    case 5123: {
+      uint16_t v = 0; std::memcpy(&v, p, sizeof(v));
+      return normalized ? (float)v / 65535.0f : (float)v;
+    }
+    case 5125: {
+      uint32_t v = 0; std::memcpy(&v, p, sizeof(v)); return (float)v;
+    }
+    default: return 0.0f;
+  }
+}
+
+bool glbFloats(const Value& root, const std::vector<uint8_t>& bin, int index,
+               int wanted, std::vector<float>& out, std::string& err) {
+  GlbAccessor a;
+  if (!glbAccessor(root, bin, index, a, err) || a.components < wanted) return false;
+  const int bytes = glbComponentSize(a.componentType);
+  out.resize(a.count * (size_t)wanted);
+  for (size_t i = 0; i < a.count; ++i) {
+    const uint8_t* base = bin.data() + a.offset + i * a.stride;
+    for (int c = 0; c < wanted; ++c)
+      out[i * (size_t)wanted + (size_t)c] = glbComponent(base + c * bytes,
+                                                           a.componentType,
+                                                           a.normalized);
+  }
+  return true;
+}
+
+bool glbIndices(const Value& root, const std::vector<uint8_t>& bin, int index,
+                std::vector<uint32_t>& out, std::string& err) {
+  GlbAccessor a;
+  if (!glbAccessor(root, bin, index, a, err) || a.components != 1) return false;
+  const int bytes = glbComponentSize(a.componentType);
+  if (a.componentType != 5121 && a.componentType != 5123 && a.componentType != 5125) {
+    err = "indices must use an unsigned integer component type";
+    return false;
+  }
+  out.resize(a.count);
+  for (size_t i = 0; i < a.count; ++i)
+    out[i] = (uint32_t)glbComponent(bin.data() + a.offset + i * a.stride,
+                                     a.componentType, false);
+  (void)bytes;
+  return true;
+}
+
+struct GlbMat {
+  float m[16];
+};
+
+GlbMat glbIdentity() {
+  GlbMat r{}; r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1.0f; return r;
+}
+
+GlbMat glbMul(const GlbMat& a, const GlbMat& b) {
+  GlbMat r{};
+  for (int c = 0; c < 4; ++c)
+    for (int row = 0; row < 4; ++row)
+      for (int k = 0; k < 4; ++k)
+        r.m[c * 4 + row] += a.m[k * 4 + row] * b.m[c * 4 + k];
+  return r;
+}
+
+GlbMat glbNodeMatrix(const Value& node) {
+  const Value& matrix = node.get("matrix");
+  if (matrix.isArr() && matrix.size() >= 16) {
+    GlbMat r{};
+    for (int i = 0; i < 16; ++i) r.m[i] = matrix.atIndex((size_t)i).asFloat(i % 5 == 0 ? 1.0f : 0.0f);
+    return r;
+  }
+  GlbMat r = glbIdentity();
+  const Value& t = node.get("translation");
+  if (t.isArr() && t.size() >= 3) {
+    r.m[12] = t.atIndex(0).asFloat(); r.m[13] = t.atIndex(1).asFloat(); r.m[14] = t.atIndex(2).asFloat();
+  }
+  Q4 q{0, 0, 0, 1};
+  const Value& rv = node.get("rotation");
+  if (rv.isArr() && rv.size() >= 4)
+    q = {rv.atIndex(0).asFloat(), rv.atIndex(1).asFloat(), rv.atIndex(2).asFloat(), rv.atIndex(3).asFloat()};
+  const Mat3 qm = mat3FromQuat(q);
+  GlbMat rot = glbIdentity();
+  for (int i = 0; i < 9; ++i) rot.m[(i / 3) * 4 + (i % 3)] = qm[i];
+  const Value& sv = node.get("scale");
+  V3 scale{1, 1, 1};
+  if (sv.isArr() && sv.size() >= 3) scale = {sv.atIndex(0).asFloat(1), sv.atIndex(1).asFloat(1), sv.atIndex(2).asFloat(1)};
+  GlbMat scl = glbIdentity(); scl.m[0] = scale[0]; scl.m[5] = scale[1]; scl.m[10] = scale[2];
+  return glbMul(glbMul(r, rot), scl);
+}
+
+void glbTransform(MeshPrimitive& mesh, const GlbMat& m) {
+  for (size_t i = 0; i + 2 < mesh.positions.size(); i += 3) {
+    const float x = mesh.positions[i], y = mesh.positions[i + 1], z = mesh.positions[i + 2];
+    mesh.positions[i] = m.m[0] * x + m.m[4] * y + m.m[8] * z + m.m[12];
+    mesh.positions[i + 1] = m.m[1] * x + m.m[5] * y + m.m[9] * z + m.m[13];
+    mesh.positions[i + 2] = m.m[2] * x + m.m[6] * y + m.m[10] * z + m.m[14];
+  }
+  for (size_t i = 0; i + 2 < mesh.normals.size(); i += 3) {
+    V3 n{m.m[0] * mesh.normals[i] + m.m[4] * mesh.normals[i + 1] + m.m[8] * mesh.normals[i + 2],
+         m.m[1] * mesh.normals[i] + m.m[5] * mesh.normals[i + 1] + m.m[9] * mesh.normals[i + 2],
+         m.m[2] * mesh.normals[i] + m.m[6] * mesh.normals[i + 1] + m.m[10] * mesh.normals[i + 2]};
+    n = vNorm(n);
+    mesh.normals[i] = n[0]; mesh.normals[i + 1] = n[1]; mesh.normals[i + 2] = n[2];
+  }
+}
+
+Material glbMaterial(const Value& root, int index) {
+  Material m;
+  const Value& mats = root.get("materials");
+  const Value& src = mats.atIndex(index < 0 ? (size_t)-1 : (size_t)index);
+  if (!src.isObj()) return m;
+  const Value& pbr = src.get("pbrMetallicRoughness");
+  float f[4];
+  if (pbr.get("baseColorFactor").toFloats(f, 4) == 4) m.baseColor = {f[0], f[1], f[2], f[3]};
+  m.metallic = pbr.get("metallicFactor").asFloat(m.metallic);
+  m.roughness = pbr.get("roughnessFactor").asFloat(m.roughness);
+  if (src.get("emissiveFactor").toFloats(f, 3) == 3) m.emission = {f[0], f[1], f[2]};
+  m.opacity = m.baseColor[3];
+  return m;
+}
+
+}  // namespace
+
+bool GlbImporter::load(const std::string& path, Model& out) {
+  std::vector<uint8_t> bytes = runtimeFS().read(path);
+  if (bytes.empty()) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec) && !ec) {
+      std::ifstream f(path, std::ios::binary);
+      if (f) bytes.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+  }
+  if (bytes.empty()) {
+    Log::error("MODEL", "cannot open GLB: " + path);
+    return false;
+  }
+  return loadBytes(bytes, out, path);
+}
+
+bool GlbImporter::loadBytes(const std::vector<uint8_t>& bytes, Model& out,
+                            const std::string& label) {
+  if (bytes.size() < 12) { Log::error("MODEL", "GLB header truncated: " + label); return false; }
+  auto u32 = [&](size_t off) -> uint32_t {
+    uint32_t v = 0; std::memcpy(&v, bytes.data() + off, sizeof(v)); return v;
+  };
+  if (u32(0) != 0x46546C67u || u32(4) != 2u) {
+    Log::error("MODEL", "unsupported GLB header: " + label); return false;
+  }
+  const size_t total = u32(8);
+  if (total < 12 || total > bytes.size()) {
+    Log::error("MODEL", "invalid GLB length: " + label); return false;
+  }
+  std::string json;
+  std::vector<uint8_t> bin;
+  size_t off = 12;
+  while (off + 8 <= total) {
+    const size_t len = u32(off);
+    const uint32_t type = u32(off + 4);
+    off += 8;
+    if (!glbRange(off, len, total)) { Log::error("MODEL", "GLB chunk exceeds file: " + label); return false; }
+    if (type == 0x4E4F534Au) json.assign((const char*)bytes.data() + off, len);
+    else if (type == 0x004E4942u) bin.assign(bytes.begin() + (ptrdiff_t)off, bytes.begin() + (ptrdiff_t)(off + len));
+    off += len;
+  }
+  while (!json.empty() && (json.back() == '\0' || json.back() == ' ' || json.back() == '\n' || json.back() == '\r' || json.back() == '\t')) json.pop_back();
+  if (json.empty() || bin.empty()) { Log::error("MODEL", "GLB needs JSON and BIN chunks: " + label); return false; }
+
+  try {
+    const Value root = Json::parseText(json);
+    const Value& meshes = root.get("meshes");
+    if (!meshes.isArr() || meshes.size() == 0) throw std::runtime_error("GLB has no meshes");
+    out.meshes.clear();
+    out.name = std::filesystem::path(label).stem().string();
+    const auto emitMesh = [&](int meshIndex, const GlbMat& world) {
+      if (meshIndex < 0 || (size_t)meshIndex >= meshes.size()) return;
+      const Value& meshDef = meshes.atIndex((size_t)meshIndex);
+      const Value& primitives = meshDef.get("primitives");
+      if (!primitives.isArr()) return;
+      for (const auto& primitive : primitives.asArr()) {
+        if (!primitive.isObj()) continue;
+        const int mode = primitive.get("mode").asInt(4);
+        if (mode != 4 && mode != 5 && mode != 6) {
+          Log::warn("MODEL", "GLB primitive mode is not triangles/strip/fan; skipped");
+          continue;
+        }
+        const Value& attrs = primitive.get("attributes");
+        const int posIndex = attrs.get("POSITION").asInt(-1);
+        std::string err;
+        GlbAccessor posInfo;
+        if (posIndex < 0 || !glbAccessor(root, bin, posIndex, posInfo, err) || posInfo.components != 3) {
+          Log::warn("MODEL", "GLB primitive has no valid POSITION: " + err);
+          continue;
+        }
+        MeshPrimitive m;
+        if (!glbFloats(root, bin, posIndex, 3, m.positions, err)) { Log::warn("MODEL", err); continue; }
+        const int normalIndex = attrs.get("NORMAL").asInt(-1);
+        const int uvIndex = attrs.get("TEXCOORD_0").asInt(-1);
+        if (normalIndex >= 0) glbFloats(root, bin, normalIndex, 3, m.normals, err);
+        if (uvIndex >= 0) glbFloats(root, bin, uvIndex, 2, m.uvs, err);
+        const size_t vcount = m.positions.size() / 3;
+        if (m.normals.size() != vcount * 3) m.normals.assign(vcount * 3, 0.0f);
+        if (m.uvs.size() != vcount * 2) m.uvs.assign(vcount * 2, 0.0f);
+        std::vector<uint32_t> src;
+        const int indexAccessor = primitive.get("indices").asInt(-1);
+        if (indexAccessor >= 0 && !glbIndices(root, bin, indexAccessor, src, err)) { Log::warn("MODEL", err); continue; }
+        if (src.empty()) { src.resize(vcount); for (size_t i = 0; i < vcount; ++i) src[i] = (uint32_t)i; }
+        if (mode == 4) m.indices = std::move(src);
+        else if (mode == 6) {
+          for (size_t i = 1; i + 1 < src.size(); ++i) { m.indices.push_back(src[0]); m.indices.push_back(src[i]); m.indices.push_back(src[i + 1]); }
+        } else {
+          for (size_t i = 2; i < src.size(); ++i) {
+            const uint32_t a = src[i - 2], b = src[i - 1], c = src[i];
+            if (a == b || b == c || a == c) continue;
+            if (i & 1) { m.indices.insert(m.indices.end(), {b, a, c}); }
+            else { m.indices.insert(m.indices.end(), {a, b, c}); }
+          }
+        }
+        if (m.indices.empty() || std::any_of(m.indices.begin(), m.indices.end(),
+                                              [vcount](uint32_t i) { return (size_t)i >= vcount; })) {
+          Log::warn("MODEL", "GLB primitive index is outside POSITION accessor");
+          continue;
+        }
+        const int materialIndex = primitive.get("material").asInt(-1);
+        m.material = glbMaterial(root, materialIndex);
+        glbTransform(m, world);
+        m.upload();
+        if (m.indexCount > 0) out.meshes.push_back(std::move(m));
+      }
+    };
+
+    const Value& nodes = root.get("nodes");
+    std::function<void(int, const GlbMat&)> visit = [&](int nodeIndex, const GlbMat& parent) {
+      const Value& node = nodes.atIndex(nodeIndex < 0 ? (size_t)-1 : (size_t)nodeIndex);
+      if (!node.isObj()) return;
+      const GlbMat world = glbMul(parent, glbNodeMatrix(node));
+      const int meshIndex = node.get("mesh").asInt(-1);
+      if (meshIndex >= 0) emitMesh(meshIndex, world);
+      const Value& children = node.get("children");
+      if (children.isArr()) for (const auto& child : children.asArr()) visit(child.asInt(-1), world);
+    };
+    const Value& scenes = root.get("scenes");
+    const int sceneIndex = root.get("scene").asInt(0);
+    bool visitedNodes = false;
+    if (nodes.isArr() && scenes.isArr() && sceneIndex >= 0 && (size_t)sceneIndex < scenes.size()) {
+      const Value& roots = scenes.atIndex((size_t)sceneIndex).get("nodes");
+      if (roots.isArr()) {
+        for (const auto& rootNode : roots.asArr()) { visit(rootNode.asInt(-1), glbIdentity()); visitedNodes = true; }
+      }
+    }
+    if (!visitedNodes) for (size_t i = 0; i < meshes.size(); ++i) emitMesh((int)i, glbIdentity());
+    if (out.meshes.empty()) throw std::runtime_error("GLB contains no renderable triangle primitives");
+    size_t vertices = 0;
+    for (const auto& m : out.meshes) vertices += m.positions.size() / 3;
+    Log::info("MODEL", "loaded GLB '" + label + "' (" + std::to_string(out.meshes.size()) +
+                         " primitives, " + std::to_string(vertices) + " verts)");
+    return true;
+  } catch (const std::exception& e) {
+    Log::error("MODEL", "GLB parse failed: " + label + " (" + e.what() + ")");
+    out.meshes.clear();
+    return false;
+  }
+}
+
 bool ObjImporter::load(const std::string& path, Model& out) {
+  std::string ext = std::filesystem::path(path).extension().string();
+  for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+  if (ext == ".glb") return GlbImporter::load(path, out);
   std::string text = runtimeFS().readText(path);
   if (text.empty()) {
     // absolute editor path: direct read
@@ -141,7 +496,7 @@ bool ObjImporter::load(const std::string& path, Model& out) {
     }
   }
   if (text.empty()) {
-    Log::error("MODEL", "cannot open OBJ: " + path);
+    Log::error("MODEL", "cannot open model: " + path);
     return false;
   }
   return loadText(text, out, path);

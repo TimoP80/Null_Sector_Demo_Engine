@@ -105,6 +105,7 @@ at 15.2 { show SceneTwo;  marker B }</pre>
               <tr><td><code>play</code></td><td><code>play music</code></td><td>Start the track</td></tr>
               <tr><td><code>fade</code></td><td><code>fade in 2</code> · <code>fade out 2</code></td><td>Fade from / to black</td></tr>
               <tr><td><code>transition</code></td><td><code>transition fade 1</code></td><td>Scene transition over N s</td></tr>
+              <tr><td><code>image</code></td><td><code>image poster poster.png { transition fade; duration 1 }</code></td><td>Display a texture with a per-image entrance transition.</td></tr>
               <tr><td><code>post</code></td><td><code>post preset cinematic</code> · <code>post legacy</code></td><td>Switch post chain (preset / legacy / inline)</td></tr>
               <tr><td><code>anim</code></td><td><code>anim spin node:gem.euler linear { 0 (0,0,0); 9 (0,360,0) }</code></td><td>Define &amp; play keyframed animation</td></tr>
               <tr><td><code>marker</code></td><td><code>marker Awakening</code></td><td>Named cue point</td></tr>
@@ -126,6 +127,7 @@ at 15.2 { show SceneTwo;  marker B }</pre>
               <tbody>
                 <tr><td><code>mesh</code></td><td><code>mesh gem { model gem.obj; material neon; pos (2.2,1.4,0); scale (0.8,0.8,0.8) }</code></td></tr>
                 <tr><td><code>sprite</code></td><td><code>sprite halo { tex ghost_logo.png; pos (0,1.9,-4); size (5,2.5,1); opacity 0.55 }</code></td></tr>
+                <tr><td><code>image</code></td><td><code>image logo.png { transition zoom; duration 0.8 }</code></td></tr>
                 <tr><td><code>text</code></td><td><code>text cap { text "HELLO"; pos (0,0.5,0); size 26; style neon }</code></td></tr>
                 <tr><td><code>light</code></td><td><code>light sun { type directional; color (1,0.92,0.78); intensity 2.0 }</code></td></tr>
                 <tr><td><code>particles</code></td><td><code>particles dust { count 5000 }</code></td></tr>
