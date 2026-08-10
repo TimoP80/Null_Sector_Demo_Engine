@@ -216,7 +216,6 @@ production.
   Core, Tunnel, Lost City, Corruption, Dream, Neural Ocean, System Failure,
   Final Reconstruction, New Reality) with a full 346 s soundtrack and
   data-driven timeline
-- **Null Sector Demo Engine** — flagship production shipping as `data/demo.nsd`
 - Dear ImGui demo editor (timeline, hierarchy, inspector, asset drops)
 - Validation suite: `--check-shaders`, `--check-production`, `--check-models`,
   `--check-shadertoy`, `--check-hotreload`, `--smoke-audio`, plus framework
