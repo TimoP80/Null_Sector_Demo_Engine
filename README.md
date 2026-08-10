@@ -7,10 +7,6 @@ A data-driven C++17/OpenGL demoscene production engine. The show is **data** —
 post-processing — and the engine just plays it. New productions need little or
 no C++.
 
-The flagship production, **Null Sector Demo Engine**, ships as `data/demo.nsd`
-plus the shaders and assets it references. A tiny second production,
-`data/examples/ExampleDemo.nsd`, demonstrates the whole format on one page.
-
 ```
 production (.nsd) ──► ScriptParser ──► Timeline ──► Director (DemoApp) ──► Effects ──► GL
                         │                                                     ▲
