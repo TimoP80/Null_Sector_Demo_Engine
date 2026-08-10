@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// NULL SECTOR // GHOST IN THE MACHINE - native app shell (thin).
+// NULL SECTOR // DEMO ENGINE - native app shell (thin).
 // Creates the window + GL context + the engine subsystems, wires them into
 // the DemoApp data-driven director, and runs the frame loop. There is NO show
 // logic here: the demo itself (scenes, cameras, effects, animations, post,
@@ -122,8 +122,8 @@ static void writeExportFrame(FILE* pipe, int fbW, int fbH) {
  *  An explicit --track is handled by splitTrackList - the first entry plays
  *  at boot. Returns a VIRTUAL path (works for dev tree and .nsp packages). */
 static std::string findTrack(const std::string& prodScript) {
-  const char* cands[] = {"ghostinthemachine.mp3", "audio.mp3", "assets/audio.mp3",
-                         "ghostinthemachine.wav", "audio.wav", "assets/audio.wav"};
+  const char* cands[] = {"nullsectordemoengine.mp3", "audio.mp3", "assets/audio.mp3",
+                         "nullsectordemoengine.wav", "audio.wav", "assets/audio.wav"};
   for (const char* c : cands) {
     if (runtimeFS().exists(c)) return c;
   }
@@ -284,7 +284,7 @@ int main(int argc, char** argv) {
     } else if (a == "--editor") editorMode = true;
     else if (a.rfind("--editor-seconds=", 0) == 0) editorSeconds = (float)std::atof(a.c_str() + 17);
     else if (a == "--help" || a == "-h") {
-      std::printf("NULL SECTOR // GHOST IN THE MACHINE (data-driven)\n"
+      std::printf("NULL SECTOR // DEMO ENGINE (data-driven)\n"
                   "  --check-production[=PATH]  headless production validation (no GL): parse\n"
                   "                  the .nsd + verify every scene/effect/asset/rig reference\n"
                   "                  resolves (default: data/demo.nsd), then exit 0/1\n"
@@ -347,7 +347,7 @@ int main(int argc, char** argv) {
   }
 
   // --- packaging mode (GL-free) -----------------------------------------------
-  // ns_demo --pack data/demo.nsd --output GhostInTheMachine.nsp
+  // ns_demo --pack data/demo.nsd --output NullSectorDemoEngine.nsp
   if (!packArg.empty()) {
     const std::string root =
         rootArg.empty() ? std::filesystem::current_path().string() : rootArg;
@@ -407,7 +407,7 @@ int main(int argc, char** argv) {
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
   g_window = glfwCreateWindow(winW, winH,
                               editorMode ? "NULL SECTOR // DEMO EDITOR"
-                                         : "NULL SECTOR // GHOST IN THE MACHINE",
+                                         : "Null Sector Demo Engine",
                               nullptr, nullptr);
   if (!g_window) { std::fprintf(stderr, "[MAIN] window creation failed\n"); glfwTerminate(); return 1; }
   glfwMakeContextCurrent(g_window);
@@ -598,9 +598,10 @@ int main(int argc, char** argv) {
     return rc;
   }
 
-  // music + show clock start together (the script fades in from black);
-  // without a track the show runs silent but the clock keeps moving
-  audio.start();
+  // The standalone player remains autoplaying, but the editor owns its
+  // transport: it starts paused and lazily starts audio when Play/Space is
+  // pressed so opening a project never begins playback unexpectedly.
+  if (!editorMode) audio.start();
 
   // --shot=SECONDS:FILE.bmp: jump the show + track straight to the target
   // (a little early so the audio analyser has ~1s of history when the frame
@@ -621,11 +622,19 @@ int main(int argc, char** argv) {
 
   // --- demo editor mode: the engine runs inside a dockable ImGui shell -----------
   if (editorMode) {
+    // A video-editor style transport opens at the beginning and stays stopped
+    // until the author presses Play or Space. Seek once so the first frame
+    // still activates the section at t=0 without advancing the clock.
+    director.paused = true;
+    app.seek(director.show);
+    timeline.advance(director.show);
+
     DemoEditor::Wiring ew;
     ew.app = &app;
     ew.r = &renderer;
     ew.camera = &camera;
     ew.audio = &audio;
+    ew.assets = &assets;
     ew.timeline = &timeline;
     ew.postfx = &postfx;
     ew.director = &director;
@@ -700,7 +709,7 @@ int main(int argc, char** argv) {
   // --- main loop --------------------------------------------------------------------
   double last = wallNow();
   const double perfStart = wallNow();
-  std::fprintf(stderr, "[MAIN] NULL SECTOR // GHOST IN THE MACHINE - data-driven demo\n");
+  std::fprintf(stderr, "[MAIN] NULL SECTOR // DEMO ENGINE - data-driven demo\n");
 
   // runtime track switching (T / Shift+T): an explicit --track list, or the
   // playable files on disk; swapped in asynchronously so the decode never

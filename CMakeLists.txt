@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# NULL SECTOR // GHOST IN THE MACHINE - data-driven demo engine
+# NULL SECTOR // DEMO ENGINE - data-driven demo engine
 #
 # Targets:
 #   ns_framework  static lib - GL-free framework core (scripting, timeline,
@@ -155,6 +155,7 @@ if(NS_BUILD_APP)
     src/editor/editor_export.cpp
     src/editor/packaging.cpp
     src/editor/exportmp4.cpp
+    src/editor/shaderlab.cpp
   )
   target_include_directories(ns_demo PRIVATE third_party)
   target_link_libraries(ns_demo PRIVATE ns_framework glfw imgui)

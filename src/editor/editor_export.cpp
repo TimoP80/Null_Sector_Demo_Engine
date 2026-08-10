@@ -54,7 +54,9 @@ void DemoEditor::startExport(const std::string& path,
     return;
   }
   // run the production once from 0:00 (music included, so the muxed track
-  // matches what the show reacts to)
+  // matches what the show reacts to). Editor startup is lazy, so an export
+  // must explicitly start the audio clock before capturing.
+  if (w_.audio && !w_.audio->started) w_.audio->start();
   if (w_.director) {
     w_.director->init(0);
     w_.director->paused = false;

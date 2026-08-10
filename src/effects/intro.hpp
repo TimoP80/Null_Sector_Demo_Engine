@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// NULL SECTOR // GHOST IN THE MACHINE - intro prototype effect layer.
+// NULL SECTOR // DEMO ENGINE - intro prototype effect layer.
 //
 // The opening 20-30s as a set of independent, reusable renderers composed by
 // IntroFX. Each system owns its shader program + state and can be dropped

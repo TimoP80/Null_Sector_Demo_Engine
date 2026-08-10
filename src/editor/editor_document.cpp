@@ -180,7 +180,8 @@ at 0 { show Intro; marker FirstSignal }
   applyTimelineViewForShow(showKey());
   if (w_.director) {
     w_.director->show = 0.0f;
-    w_.director->paused = false;
+    // New projects follow the editor's stopped-by-default transport policy.
+    w_.director->paused = true;
   }
   w_.app->seek(0.0f);
   if (w_.timeline) w_.timeline->advance(0.0f);

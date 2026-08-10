@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// NULL SECTOR // GHOST IN THE MACHINE - intro prototype implementation.
+// NULL SECTOR // DEMO ENGINE - intro prototype implementation.
 // See intro.hpp for the timeline / architecture notes.
 // ---------------------------------------------------------------------------
 #include "effects/intro.hpp"

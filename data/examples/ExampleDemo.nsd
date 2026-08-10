@@ -1,5 +1,5 @@
 // ===========================================================================
-// EXAMPLE DEMO  -  a minimal production, separate from GHOST IN THE MACHINE.
+// EXAMPLE DEMO  -  a minimal production, separate from NULL SECTOR DEMO ENGINE.
 //
 // Run it with:   ns_demo --demo=data/examples/ExampleDemo.nsd
 // Validate it:   ns_demo --check-production=data/examples/ExampleDemo.nsd

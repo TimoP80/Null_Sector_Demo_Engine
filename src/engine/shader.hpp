@@ -29,6 +29,7 @@ public:
   void set1f(const char* name, float v);
   void set2f(const char* name, float x, float y);
   void set3f(const char* name, float x, float y, float z);
+  void set4f(const char* name, float x, float y, float z, float w);
   void set1i(const char* name, int v);
   void setVec2(const char* name, const float* v);
   void setVec3(const char* name, const float* v);

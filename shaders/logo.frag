@@ -87,7 +87,7 @@ void main() {
   // handoff: the voxel grid fades into the assembling logo
   if (handoff > 0.001) col = mix(prevCol * 1.15, col, uTransition);
 
-  // --- subtitle: GHOST IN THE MACHINE (TrueType atlas, unit 11) --------------
+  // --- subtitle: NULL SECTOR DEMO ENGINE (TrueType atlas, unit 11) --------------
   // Assembles beneath the wordmark after it resolves - the brief's sub-title,
   // constructed procedurally (staggered left-to-right reconstruction with hash
   // scatter while off, no fade-in). Anchored in image space just below the
@@ -104,19 +104,19 @@ void main() {
   const float subHImg = 0.030;                  // char height, image frac
   float subY = (0.5 - subYImg) / fit.y;
   float charH = subHImg / fit.y;                // cellW == cellH -> charW == charH
-  const int n = 19;
+  const int n = 23;
   float total = float(n) * charH;
   float x0 = -total * 0.5;
 
   // y-band gate folded into the condition (no early return - the fragColor
   // write below must run for every fragment)
   if (subAsmb > 0.001 && sp.y >= subY - charH * 0.5 && sp.y <= subY + charH * 0.5) {
-    int codes[19];
-    for (int ci = 0; ci < 19; ci++) codes[ci] = 32;
-    codes[0] = 71; codes[1] = 72; codes[2] = 79; codes[3] = 83; codes[4] = 84;   // GHOST
-    codes[5] = 32; codes[6] = 73; codes[7] = 78; codes[8] = 32;                  // IN
-    codes[9] = 84; codes[10] = 72; codes[11] = 69; codes[12] = 32;               // THE
-    codes[13] = 77; codes[14] = 65; codes[15] = 67; codes[16] = 72; codes[17] = 73; codes[18] = 78;  // MACHINE
+    int codes[23];
+    for (int ci = 0; ci < 23; ci++) codes[ci] = 32;
+    codes[0] = 78; codes[1] = 85; codes[2] = 76; codes[3] = 76; codes[4] = 32;
+    codes[5] = 83; codes[6] = 69; codes[7] = 67; codes[8] = 84; codes[9] = 79; codes[10] = 82; codes[11] = 32;
+    codes[12] = 68; codes[13] = 69; codes[14] = 77; codes[15] = 79; codes[16] = 32;
+    codes[17] = 69; codes[18] = 78; codes[19] = 71; codes[20] = 73; codes[21] = 78; codes[22] = 69;
 
     vec3 subCol = vec3(0.0);
     // music-reactive (computed only inside the gate, so the dormant path is
@@ -126,7 +126,7 @@ void main() {
     // bar, so the burst stays locked to the kick grid
     float kickE = uFlash;             // per-kick strobe (audio kick analyser)
     float bassE = Null.uBass;         // sub-bass analyser (0..1)
-    for (int i = 0; i < 19; i++) {
+    for (int i = 0; i < 23; i++) {
       float gx = x0 + float(i) * charH;
       if (sp.x < gx || sp.x > gx + charH) continue;
 

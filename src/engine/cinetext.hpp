@@ -41,9 +41,12 @@ public:
   /** draw a single styled line centered at NDC centerY (top = +1, bottom = -1) */
   void line(EffectContext& ctx, const std::string& text, float centerY, int sizePx,
             CineStyle style, float alpha, float seed = 0, float glow = 0.5f,
-            float progress = 1.0f, float energy = 0, float centerX = 0) {
+            float progress = 1.0f, float energy = 0, float centerX = 0,
+            const Assets* fontAssets = nullptr) {
     if (alpha <= 0.01f || text.empty()) return;
+    const Assets& atlas = fontAssets ? *fontAssets : *ctx.assets;
     const Renderer& r = *ctx.r;
+    font_ = atlas.fontMetrics;
     textMesh_.build({{text, -1.0f, seed}}, font_,
                     {r.viewW, r.viewH, sizePx, 0, centerX}, centerY);
     if (textMesh_.empty()) return;
@@ -56,24 +59,24 @@ public:
     prog_->set1f("uProgress", progress);
     prog_->set1f("uEnergy", energy);
     prog_->set1i("uStyle", (int)style);
-    ctx.assets->fontTex.bind(0);
+    atlas.fontTex.bind(0);
     textMesh_.draw();
   }
 
   /** typewriter: reveal the first `shown` chars, cursor while typing */
   void typed(EffectContext& ctx, const std::string& text, float centerY, int sizePx,
              CineStyle style, int shown, float alpha, float seed = 0, float glow = 0.5f,
-             float energy = 0, float centerX = 0) {
+             float energy = 0, float centerX = 0, const Assets* fontAssets = nullptr) {
     if (shown <= 0 || alpha <= 0.01f) return;
     std::string s = text.substr(0, (size_t)shown);
     if (shown < (int)text.size()) s += "_";  // real '_' glyph = the typing cursor
-    line(ctx, s, centerY, sizePx, style, alpha, seed, glow, 1.0f, energy, centerX);
+    line(ctx, s, centerY, sizePx, style, alpha, seed, glow, 1.0f, energy, centerX, fontAssets);
   }
 
   /** scramble: `shown` chars resolved, the rest jitter through random glyphs */
   void scramble(EffectContext& ctx, const std::string& text, float centerY, int sizePx,
                 CineStyle style, int shown, float alpha, float seed = 0, float glow = 0.5f,
-                float energy = 0, float centerX = 0) {
+                float energy = 0, float centerX = 0, const Assets* fontAssets = nullptr) {
     if (shown <= 0 || alpha <= 0.01f) return;
     static constexpr char GLYPHS[] = "01<>/\\|#@$%&*+=-;:";
     static const int NGLYPHS = (int)sizeof(GLYPHS) - 1;  // excludes the nul
@@ -87,7 +90,7 @@ public:
         s += GLYPHS[(int)(h * NGLYPHS) % NGLYPHS];
       }
     }
-    line(ctx, s, centerY, sizePx, style, alpha, seed, glow, 1.0f, energy, centerX);
+    line(ctx, s, centerY, sizePx, style, alpha, seed, glow, 1.0f, energy, centerX, fontAssets);
   }
 
   // --- timing helpers ---------------------------------------------------------

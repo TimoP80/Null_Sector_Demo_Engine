@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NULL SECTOR // GHOST IN THE MACHINE — Engine Documentation</title>
+<title>NULL SECTOR // DEMO ENGINE — Engine Documentation</title>
 <meta name="description" content="Documentation for the data-driven demo engine: a C++17/OpenGL demoscene framework scripted entirely from external files.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -15,7 +15,7 @@
 
 <div class="topbar">
   <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
-  <span class="topbar-title">GHOST IN THE MACHINE</span>
+  <span class="topbar-title">NULL SECTOR DEMO ENGINE</span>
 </div>
 
 <div class="shell">
@@ -26,7 +26,7 @@
 
       <header class="pagehead">
         <p class="eyebrow"><span class="idx">00</span> Overview</p>
-        <h1>GHOST IN THE MACHINE</h1>
+        <h1>NULL SECTOR DEMO ENGINE</h1>
         <p class="lede">A data-driven demo engine. The whole show — scenes, cameras, effects, animations, post processing, 3D models and imported Shadertoy shaders — lives in external files. The engine is never recompiled to make a new demo.</p>
         <div class="chips" style="margin-top:20px">
           <a class="chip active" href="cheatsheet.html">⚡ One-page cheat sheet</a>
@@ -134,7 +134,7 @@
       <!-- the show -->
       <section>
         <h2>The bundled demo <span class="tag">10 scenes · 125 s · 216 bpm</span></h2>
-        <p class="sec-sub">The shipped production, <em>GHOST IN THE MACHINE</em>, is scripted entirely in <code>data/demo.nsd</code>. Its section map — real times from the script:</p>
+        <p class="sec-sub">The shipped production, <em>NULL SECTOR DEMO ENGINE</em>, is scripted entirely in <code>data/demo.nsd</code>. Its section map — real times from the script:</p>
         <div class="strip">
           <div class="strip-item"><div class="st-time">0:00.0</div><div class="st-name">Awakening</div><div class="st-scene">Intro</div></div>
           <div class="strip-item"><div class="st-time">0:13.3</div><div class="st-name">Nave</div><div class="st-scene">Cathedral</div></div>
@@ -156,6 +156,7 @@
         <div class="feature-grid">
           <a class="card" href="cheatsheet.html"><span class="glyph hot">⚡</span><h3>Cheat Sheet</h3><p>One page: commands, times, rigs, interpolators — every name at a glance.</p></a>
           <a class="card" href="dsl.html"><span class="glyph hot">λ</span><h3>Scripting DSL</h3><p>The <code>scene</code>/<code>at</code> language that compiles into timeline events.</p></a>
+          <a class="card" href="editor.html"><span class="glyph hot">▣</span><h3>Demo Editor</h3><p>Live production authoring: scenes, timeline, camera rigs, transitions, assets, Shader Lab, and export.</p></a>
           <a class="card" href="timeline.html"><span class="glyph">▤</span><h3>Timeline</h3><p>Tracks, events, clips, markers; play, pause, seek, loop, speed.</p></a>
           <a class="card" href="animation.html"><span class="glyph blue">◈</span><h3>Animation</h3><p>Keyframes for any property with 9 interpolators.</p></a>
           <a class="card" href="scene.html"><span class="glyph violet">⬡</span><h3>Scene graph</h3><p>Hierarchy, transforms, tags, layers — 10 node types.</p></a>
@@ -191,7 +192,7 @@ cmake --build build --config Release --target ns_demo ns_fw_tests
           <p>While the show runs, edit <code>data/demo.nsd</code> or any shader, texture or model it references — press <kbd>F2</kbd> to reload the script, and shaders/textures/models reload automatically. No restart, no recompile.</p>
         </div>
 
-        <p class="sec-sub" style="margin-top:26px">Continue with <a href="dsl.html">the scripting DSL →</a> to read your first demo script, or jump straight to <a href="build.html">build &amp; run details →</a>.</p>
+        <p class="sec-sub" style="margin-top:26px">Continue with <a href="editor.html">the Demo Editor guide →</a> to author visually, <a href="dsl.html">the scripting DSL →</a> to read your first demo script, or jump straight to <a href="build.html">build &amp; run details →</a>.</p>
       </section>
 
       <nav id="pager" class="pager" aria-label="Next page"></nav>

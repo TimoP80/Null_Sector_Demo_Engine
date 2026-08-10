@@ -11,7 +11,7 @@
 // paths (data/..., shaders/..., assets/...), so the same package plays under
 // PackageFileSystem with no path remapping.
 //
-//   ns_demo --pack data/demo.nsd --output GhostInTheMachine.nsp
+//   ns_demo --pack data/demo.nsd --output NullSectorDemoEngine.nsp
 // ---------------------------------------------------------------------------
 #pragma once
 

@@ -30,3 +30,10 @@ perf*.json
 
 # --- Video exports (--export-mp4, editor Export MP4) ---
 *.mp4
+
+# --- Shader Lab live compile scratch ---
+shaders/.shaderlab_preview.frag
+
+# --- Local editor state and smoke projects ---
+data/editor_state.json
+data/editor_export_smoke.nsd

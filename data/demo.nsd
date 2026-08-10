@@ -1,4 +1,4 @@
-demo "GHOST IN THE MACHINE" {
+demo "NULL SECTOR DEMO ENGINE" {
     duration 125
 }
 
@@ -46,9 +46,10 @@ scene Machine {
 scene Voxel {
     bars 10  intensity 0.88  chapter 3
     title "Downtown"
-    camera CityCam { rig city; pos (0,20,30); target (0,8,0); speed 5; fov 62; sway (6,3,0); freq 0.09; handheld 0.07; dofFocus 14; dofAperture 0.04 }
-    show voxel
-    post preset vhs
+    camera Intro Cam { rig drift; pos (0,0,2.4); fov (50,58); amp 1.6; freq 0.14; handheld (0.24,0.3) }
+    show intro
+    play music
+    fade in 2
     at 9 { transition fade 1 }
 }
 
@@ -114,6 +115,7 @@ scene Greetings {
 }
 
 at 0 { show Intro; marker Awakening }
+at 6.162271 { shader shaderlab_glitch.frag { useFont true; text shaderlab } }
 at 13.3 { show Cathedral; marker Nave }
 at 26.7 { show Neuralnet; marker Synapse }
 at 40 { show Machine; marker Machine }

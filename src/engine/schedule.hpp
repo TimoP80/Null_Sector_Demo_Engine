@@ -10,7 +10,7 @@
 
 namespace ns {
 
-// the real track (ghostinthemachine.wav) runs at ~216 BPM; keep the beat grid
+// the real track (nullsectordemoengine.wav) runs at ~216 BPM; keep the beat grid
 // in lockstep so kick/beat-synced visuals land on the actual drum hits
 inline constexpr float BPM = 216.0f;
 /** seconds per beat */

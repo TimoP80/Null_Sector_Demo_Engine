@@ -24,6 +24,37 @@ namespace ns {
 void SceneFX::init(EffectContext&) {
   prog_ = std::make_unique<Shader>("fullscreen.vert", fragFile_);
   perf_.setLabel(fragFile_);
+  if (!fontFile_.empty()) {
+    auto atlas = std::make_unique<Assets>(buildTrueTypeFontAtlas(fontFile_));
+    if (atlas->fontTex.tex) fontAsset_ = std::move(atlas);
+    else Log::warn("SCENE", "font load failed for '" + fontFile_ + "'; using default atlas");
+  }
+  if (!textureFile_.empty()) {
+    auto texture = std::make_unique<Texture>();
+    if (loadPngAsset(textureFile_, *texture)) textureAsset_ = std::move(texture);
+    else Log::warn("SCENE", "texture load failed for '" + textureFile_ + "'");
+  }
+}
+
+void SceneFX::setFontFile(const std::string& path) {
+  if (fontFile_ == path) return;
+  fontFile_ = path;
+  fontAsset_.reset();
+  if (fontFile_.empty() || !prog_) return;
+  auto atlas = std::make_unique<Assets>(buildTrueTypeFontAtlas(fontFile_));
+  if (atlas->fontTex.tex) fontAsset_ = std::move(atlas);
+  else Log::warn("SCENE", "font load failed for '" + fontFile_ + "'; using default atlas");
+}
+
+void SceneFX::setTextureFile(const std::string& path, const char* uniform, int unit) {
+  textureFile_ = path;
+  textureUniform_ = uniform ? uniform : "uFillTexture";
+  textureUnit_ = std::max(0, unit);
+  textureAsset_.reset();
+  if (textureFile_.empty() || !prog_) return;
+  auto texture = std::make_unique<Texture>();
+  if (loadPngAsset(textureFile_, *texture)) textureAsset_ = std::move(texture);
+  else Log::warn("SCENE", "texture load failed for '" + textureFile_ + "'");
 }
 
 void SceneFX::render(EffectContext& ctx) {
@@ -36,6 +67,35 @@ void SceneFX::render(EffectContext& ctx) {
   ::glDisable(::gl::CULL_FACE);
 
   prog_->use();
+  // Shader Lab and hand-authored quad shaders receive the same stable inputs
+  // as the shared UBO-driven production effects. Missing uniforms are cheap
+  // no-ops, so existing scenes remain unchanged.
+  if (ctx.r) prog_->set2f("uResolution", (float)ctx.r->resW, (float)ctx.r->resH);
+  prog_->set1f("uTime", ctx.time);
+  prog_->set1f("uDeltaTime", ctx.dt);
+  const TimelineState* ts = ctx.timeline ? &ctx.timeline->s : nullptr;
+  const float bpm = ctx.timeline && ctx.timeline->beatSec() > 0
+                        ? 60.0f / ctx.timeline->beatSec() : 120.0f;
+  prog_->set1f("uBPM", bpm);
+  prog_->set1f("uBeat", ts ? ts->beat : 0.0f);
+  prog_->set1f("uBar", ts ? ts->bar : 0.0f);
+  prog_->set1f("uBeatPhase", ts ? ts->beatPhase : 0.0f);
+  prog_->set1f("uProgress", ts ? ts->sectionProgress : 0.0f);
+  prog_->set1f("uIntensity", ts ? ts->intensity : 1.0f);
+  prog_->set1f("uBass", ctx.audio ? ctx.audio->react.bass.load() : 0.0f);
+  prog_->set1f("uMid", ctx.audio ? ctx.audio->react.mid.load() : 0.0f);
+  prog_->set1f("uTreble", ctx.audio ? ctx.audio->react.treble.load() : 0.0f);
+  prog_->set1f("uAudioLevel", ctx.audio ? ctx.audio->react.energy.load() : 0.0f);
+  prog_->set1f("uKick", ctx.audio ? ctx.audio->react.kick.load() : 0.0f);
+  prog_->set1f("uSnare", ctx.audio ? ctx.audio->react.onset.load() : 0.0f);
+  prog_->set4f("uColor", 0.05f, 0.95f, 0.85f, 1.0f);
+  prog_->set4f("uColor2", 0.35f, 0.15f, 1.0f, 1.0f);
+  prog_->set1f("uSpeed", 1.0f);
+  prog_->set1f("uScale", 1.0f);
+  prog_->set1f("uTextScale", 1.0f);
+  prog_->set2f("uTextPos", 0.0f, 0.0f);
+  prog_->set1f("uTextRotation", 0.0f);
+  prog_->set1f("uTextOpacity", 1.0f);
   prog_->set1f("uFlash", flash);
   prog_->set1f("uMode", mode);   // no-op for shaders that don't declare it
   // when the scene renders into a reduced-size target (neuralnet), hand the
@@ -70,18 +130,32 @@ void SceneFX::render(EffectContext& ctx) {
     ::glActiveTexture(::gl::TEXTURE0 + texUnit_);
     ::glBindTexture(::gl::TEXTURE_2D, tex_);
   }
+  prog_->set1f("uTextureEnabled", textureAsset_ ? 1.0f : 0.0f);
+  prog_->set1f("uTextureMix", 1.0f);
+  prog_->set1f("uTextureScale", 1.0f);
+  prog_->set1f("uTextureScroll", 0.0f);
+  if (textureAsset_) {
+    prog_->set1i(textureUniform_.c_str(), textureUnit_);
+    textureAsset_->bind(textureUnit_);
+  }
   for (const auto& kv : extraUniforms) {
     prog_->set1f(kv.first.c_str(), kv.second);
   }
-  if (useFont_ && ctx.assets && ctx.assets->fontTex.tex) {
+  const Assets* fontAssets = fontAsset_ ? fontAsset_.get() : ctx.assets;
+  if (useFont_ && fontAssets && fontAssets->fontTex.tex) {
     // TrueType atlas for in-shader glyph drawing (uFont on unit 11, which the
-    // post pipeline never touches - it uses units 0..8, prev 9, scene tex 10)
-    const FontMetrics& fm = ctx.assets->fontMetrics;
+    // post pipeline never touches - it uses units 0..8, prev 9, scene tex 10).
+    // A shader can select a project font without changing the global runtime
+    // font used by other scenes.
+    const FontMetrics& fm = fontAssets->fontMetrics;
     prog_->set1i("uFont", 11);
+    // `uText` is the same atlas for Shader Lab exports; advanced shaders can
+    // sample it directly, while production shaders continue using uFont.
+    prog_->set1i("uText", 11);
     prog_->setVec2("uAtlas", (float)fm.atlasW, (float)fm.atlasH);
     prog_->setVec2("uCell", (float)fm.cellW, (float)fm.cellH);
     ::glActiveTexture(::gl::TEXTURE0 + 11);
-    ::glBindTexture(::gl::TEXTURE_2D, ctx.assets->fontTex.tex);
+    ::glBindTexture(::gl::TEXTURE_2D, fontAssets->fontTex.tex);
   }
   ctx.r->fsTriangle.draw(3);
 

@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // ScriptParser - the demo scripting DSL.
 //
-//   demo "GHOST IN THE MACHINE" {
+//   demo "NULL SECTOR DEMO ENGINE" {
 //       bpm 216
 //   }
 //

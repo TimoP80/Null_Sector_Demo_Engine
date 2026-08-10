@@ -3,11 +3,11 @@
 //
 // Mounting a package makes it indistinguishable from the dev tree to every
 // runtime asset load: read("shaders/tunnel.frag") works whether the file is
-// data/shaders/tunnel.frag or inside GhostInTheMachine.nsp.
+// data/shaders/tunnel.frag or inside NullSectorDemoEngine.nsp.
 //
 //   PackageFileSystem fs;
 //   std::string err;
-//   if (!fs.open("GhostInTheMachine.nsp", &err)) { ... }
+//   if (!fs.open("NullSectorDemoEngine.nsp", &err)) { ... }
 //   setRuntimeFS(std::make_unique<PackageFileSystem>(std::move(fs)));
 //
 // Reads are random-access + hash-verified per file; structural validation

@@ -15,6 +15,7 @@
 
 #include "effects/base_fwd.hpp"
 #include "effects/kickflash.hpp"
+#include "engine/assets.hpp"
 #include "engine/mesh.hpp"
 #include "engine/perftimer.hpp"
 #include "engine/shader.hpp"
@@ -53,9 +54,15 @@ public:
 
   /** bind the shared TrueType font atlas (uFont on unit 11, uAtlas/uCell from
    *  assets->fontMetrics) so a scene shader can draw atlas glyphs (e.g. the
-   *  logo scene's GHOST IN THE MACHINE subtitle). The atlas is owned by
+   *  logo scene's NULL SECTOR DEMO ENGINE subtitle). The atlas is owned by
    *  Assets for the whole show, so no lifetime concerns. */
   void useFont(bool on) { useFont_ = on; }
+  /** Select a per-effect TrueType atlas. The path may be a runtime virtual
+   *  path such as assets/fonts/intro.ttf or a development absolute path. */
+  void setFontFile(const std::string& path);
+  /** Select a per-effect fill texture for generated/textured shaders. */
+  void setTextureFile(const std::string& path, const char* uniform = "uFillTexture",
+                      int unit = 1);
 
   /** stable run snapshot (--perf-json exit dump). */
   PerfSample perfSample() const override { return perf_.sample(); }
@@ -76,6 +83,12 @@ private:
   std::string fragFile_;
   bool handoff_ = false;
   bool useFont_ = false;
+  std::string fontFile_;
+  std::unique_ptr<Assets> fontAsset_;
+  std::string textureFile_;
+  std::string textureUniform_ = "uFillTexture";
+  int textureUnit_ = 1;
+  std::unique_ptr<Texture> textureAsset_;
   const char* texName_ = nullptr;
   unsigned tex_ = 0;
   int texUnit_ = 10;

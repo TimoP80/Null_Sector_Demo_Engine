@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Demo Editor — Engine Documentation</title>
+<meta name="description" content="Documentation for the Null Sector Demo Engine editor: production authoring, timeline editing, camera rigs, transitions, assets, Shader Lab, and export.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="topbar">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <span class="topbar-title">NULL SECTOR DEMO ENGINE</span>
+</div>
+
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+
+  <main id="main" class="content">
+    <div class="main-inner">
+      <header class="pagehead">
+        <p class="eyebrow"><span class="idx">ED</span> Authoring · Demo Editor</p>
+        <h1>Demo Editor</h1>
+        <p class="lede">A live production workspace for building a show without leaving the engine. Edit the <code>.nsd</code> document, preview the real runtime, tune the timeline and camera, and save or export the result from one dockable interface.</p>
+        <div class="chips" style="margin-top:20px">
+          <a class="chip active" href="dsl.html">Read the NSD scripting reference →</a>
+        </div>
+      </header>
+
+      <section id="start">
+        <h2>Start the editor</h2>
+        <p class="sec-sub">Build the application, then launch the editor against the production you want to author. The editor uses the same renderer and director as standalone playback.</p>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">terminal</span><span class="lang">bash</span></div>
+          <pre># open the default production
+./build/Release/ns_demo.exe --editor --demo=data/demo.nsd
+
+# open a different project
+./build/Release/ns_demo.exe --editor --demo=data/my_show.nsd
+
+# optional: start without restoring an audio track
+./build/Release/ns_demo.exe --editor --demo=data/my_show.nsd --no-track</pre>
+        </div>
+        <div class="callout tip">
+          <span class="ct-label">Paused by default</span>
+          <p>The editor opens at <code>0:00</code> with the first scene rendered but the show stopped. Press <kbd>Space</kbd> or click <strong>Play</strong> when you are ready to run the transport. Standalone playback still starts automatically.</p>
+        </div>
+      </section>
+
+      <section id="workspace">
+        <h2>Workspace</h2>
+        <p class="sec-sub">Panels are dockable and their layout is saved in <code>imgui.ini</code>. Toggle them from <strong>View</strong>; use <strong>View → Reset Layout</strong> if a panel is lost or docked somewhere unexpected.</p>
+        <div class="grid">
+          <div class="card"><span class="glyph">▣</span><h3>Viewport</h3><p>The actual runtime frame. Select nodes, drag assets onto it, use right-drag for fly camera, and inspect the result at the current playhead.</p></div>
+          <div class="card"><span class="glyph blue">☷</span><h3>Hierarchy</h3><p>Scene list and scene-graph nodes. Select a scene to edit its setup, then select a node to edit its transform and payload.</p></div>
+          <div class="card"><span class="glyph amber">◈</span><h3>Inspector</h3><p>Transforms, text, models, sprites, lights, particles, camera rigs, visibility, and scene transition controls.</p></div>
+          <div class="card"><span class="glyph">▤</span><h3>Timeline</h3><p>Full-show lanes, scene sections, markers, waveform, FFT strip, beat grid, scrollbar, and Fit-to-show navigation.</p></div>
+          <div class="card"><span class="glyph violet">⌘</span><h3>NSD Commands</h3><p>Templates and an editable source field for commands that are not represented by a specialized inspector.</p></div>
+          <div class="card"><span class="glyph hot">ƒ</span><h3>Shader Lab</h3><p>Typography-focused live fragment-shader workspace with presets, parameters, text, compilation diagnostics, and export into the show.</p></div>
+        </div>
+      </section>
+
+      <section id="projects">
+        <h2>Projects and documents</h2>
+        <p class="sec-sub">The editor treats the parsed production as a document, then serializes edits back to NSD. The runtime parser remains the source of truth for playback.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Command</th><th>Action</th></tr></thead>
+            <tbody>
+              <tr><td><strong>File → Load Project (.nsd)…</strong></td><td>Open another <code>.nsd</code> project through the file dialog and switch the live preview to it.</td></tr>
+              <tr><td><strong>File → Save Project (.nsd)</strong></td><td>Serialize the current document to its existing project file. An asterisk in the title marks unsaved changes.</td></tr>
+              <tr><td><strong>File → Save Project As…</strong></td><td>Write the current production to a new <code>.nsd</code> path and make that document the active project.</td></tr>
+              <tr><td><strong>File → New Project (.nsd)…</strong></td><td>Create a minimal production from scratch, ready for scenes and timeline events.</td></tr>
+              <tr><td><strong>File → Open Asset</strong></td><td>Browse Audio, Texture, Shader, Model, or Script files and apply the selected asset to the relevant editor or preview action.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct-label">Save often</span>
+          <p>Authoring changes are live in the preview, but they are not a replacement for saving the document. Use <kbd>Ctrl+S</kbd> where available, or <strong>File → Save Project (.nsd)</strong> before switching projects.</p>
+        </div>
+      </section>
+
+      <section id="transport">
+        <h2>Transport and long shows</h2>
+        <p class="sec-sub">The timeline is designed like a video editor: the visible window can be zoomed and panned independently of the show duration.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Control</th><th>Behavior</th></tr></thead>
+            <tbody>
+              <tr><td><kbd>Space</kbd> / Play</td><td>Start or pause playback. Editor startup is stopped.</td></tr>
+              <tr><td><kbd>R</kbd> / Restart</td><td>Return to 0:00 and rebuild the active scene.</td></tr>
+              <tr><td><kbd>.</kbd></td><td>Advance one frame while stopped.</td></tr>
+              <tr><td>Timeline scrub</td><td>Seek the show and re-establish the scene at the target time; audio follows the playhead.</td></tr>
+              <tr><td><strong>Fit</strong> / <kbd>F</kbd></td><td>Fit the entire project duration in the timeline. Press again to restore the previous zoom and scroll position.</td></tr>
+              <tr><td>Scrollbar</td><td>Pan through a long production without changing zoom. The handle shows how much of the show is visible.</td></tr>
+              <tr><td><kbd>Q</kbd> / <kbd>Shift+Q</kbd></td><td>Toggle beat snapping and cycle beat/bar quantization.</td></tr>
+              <tr><td><kbd>F2</kbd></td><td>Reload the NSD script from disk.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The view window is remembered per project in <code>data/editor_state.json</code>, so loading a project restores the last zoom and scroll position instead of hiding the later sections of a long show.</p>
+      </section>
+
+      <section id="audio">
+        <h2>Audio and BPM</h2>
+        <p class="sec-sub">Load a track from <strong>File → Open Asset → Load Track…</strong>, the <strong>TRK</strong> button, <kbd>Ctrl+T</kbd>, the asset browser, or an OS-level drop onto the waveform strip.</p>
+        <ul>
+          <li>WAV/MP3/OGG/FLAC files are decoded asynchronously so the editor remains responsive.</li>
+          <li>The audio analysis detects kicks and estimates BPM automatically when a track is loaded.</li>
+          <li>The detected BPM is applied to the project, serialized into the active <code>.nsd</code>, and used immediately for bars, beat grid, timeline snapping, and audio-reactive playback.</li>
+          <li>The waveform, FFT spectrogram, kick markers, beat grid, and phase alignment tools live in the Timeline panel.</li>
+          <li>Use <strong>Align beats to kicks</strong> when the BPM is correct but the track phase needs nudging. The alignment is stored per track.</li>
+        </ul>
+        <div class="code" data-lang="nsd">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">project header</span><span class="lang">nsd</span></div>
+          <pre>demo "MY SHOW" {
+    bpm 128
+    duration 346
+}</pre>
+        </div>
+      </section>
+
+      <section id="scenes">
+        <h2>Scenes and NSD commands</h2>
+        <p class="sec-sub">Use the scene list to jump directly to a scene declaration. Specialized inspector controls cover common edits; <strong>View → NSD Commands</strong> exposes the complete command vocabulary when a production needs something more specific.</p>
+        <div class="code" data-lang="nsd">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/my_show.nsd</span><span class="lang">nsd</span></div>
+          <pre>scene Core {
+    camera CoreCam { rig orbit; target (0,0,0); radius 5; omega 0.4 }
+    shader neural_core.frag
+    text caption { text "MEMORY RECOVERY"; size 32; pos (0,1,0) }
+}
+
+at 32 {
+    show Core
+    camera CoreCam
+    marker CORE
+}</pre>
+        </div>
+        <p>In the NSD Commands panel, choose a command template, edit its generated source, then insert it into the selected scene setup or at the current playhead. The editor parses and validates the command before saving and rebuilding the preview. This is the escape hatch for <code>show</code>, <code>hide</code>, <code>load</code>, <code>shader</code>, <code>post</code>, <code>anim</code>, <code>marker</code>, <code>mesh</code>, <code>sprite</code>, <code>image</code>, <code>text</code>, <code>light</code>, <code>particles</code>, and other runtime commands.
+        </p>
+      </section>
+
+      <section id="camera">
+        <h2>Camera rig authoring</h2>
+        <p class="sec-sub">Select a scene, open its <strong>Camera Rig</strong> section, and edit the rig without hand-writing every camera option. Changes are written back to the scene camera command and reloaded into the preview.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Property</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><td>Camera type</td><td>Static, Drift, Fly, Nave, Orbit, Spiral, Hover, City, Descend, or Path.</td></tr>
+              <tr><td>Position / Target</td><td>Camera pose and look-at point.</td></tr>
+              <tr><td>Sway / Amplitude / Frequency</td><td>Procedural movement and per-axis motion.</td></tr>
+              <tr><td>Speed / Orbit radius / Orbit omega</td><td>Motion parameters for traveling and orbiting rigs.</td></tr>
+              <tr><td>FOV / DOF focus / DOF aperture</td><td>Lens and depth-of-field controls.</td></tr>
+              <tr><td>Handheld / Descend rate / Descend cap</td><td>Shake and specialized rig behavior.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>If a scene has no camera command, use <strong>Add camera rig</strong> in the inspector to create one, then select the rig type from the combo box.</p>
+      </section>
+
+      <section id="transitions">
+        <h2>Scene transitions</h2>
+        <p class="sec-sub">Scene-level transitions are edited in the Inspector rather than hidden in timeline source.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Control</th><th>Serialized form</th></tr></thead>
+            <tbody>
+              <tr><td>Transition In → Fade + duration</td><td><code>fade in 1</code> in the scene setup.</td></tr>
+              <tr><td>Transition Out → Fade + duration</td><td>A scene-relative cue such as <code>at 11 { fade out 1 }</code>, placed at the scene end.</td></tr>
+              <tr><td>None</td><td>Removes the corresponding transition behavior.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Existing <code>transition fade 1</code> cues are recognized as transition-out settings. Use the editor controls for consistent timing, then preview the boundary by scrubbing across the scene edge.</p>
+      </section>
+
+      <section id="assets">
+        <h2>Assets, shaders, and Shader Lab</h2>
+        <p class="sec-sub">The editor uses one asset workflow for disk files, browser rows, OS drops, and live previews.</p>
+        <ul>
+          <li><strong>Shader:</strong> choose a <code>.frag</code> in <strong>File → Open Asset</strong> to display it live in the viewport. A shader can also be dragged onto the viewport. <strong>Add to Scene</strong> copies it into <code>shaders/</code>, inserts a shader command, and saves the project.</li>
+          <li><strong>Model:</strong> browse or drop <code>.obj</code> and <code>.glb</code> assets to warm the model path or assign them through a scene command.</li>
+          <li><strong>Image:</strong> use an image node and its transition options for textured entrance animations.</li>
+          <li><strong>Fonts:</strong> text nodes and Shader Lab can use multiple TrueType/OpenType files from <code>assets/fonts/</code>; leave the text-node font field blank for the project default or enter a path such as <code>assets/fonts/intro.ttf</code>.</li>
+          <li><strong>Texture:</strong> drop a texture onto a selected Sprite node to assign it immediately, or use a Shader Lab fill texture for image-driven glyph colour.</li>
+          <li><strong>Script:</strong> open another <code>.nsd</code> from the browser to switch projects.</li>
+        </ul>
+        <h3>Shader Lab</h3>
+        <p>Open <strong>View → Shader Lab</strong> to show the typography-oriented shader workspace. Enter text, choose any discovered font, select a preset, tune parameters, map controls to audio-reactive values, and choose a fill texture from <code>assets/textures/</code> or <code>data/textures/</code>. Texture mix, scale, and motion controls create colourful image-driven fills instead of a flat colour. Edit the generated GLSL and compile it live. Use <strong>Export / Add to Scene</strong> to place the result into the production; the selected font and texture are serialized with the shader command so playback matches the preview. The underlying shader source remains available for advanced edits.</p>
+        <div class="callout warn">
+          <span class="ct-label">Preview isolation</span>
+          <p>Changing scenes or selecting another shader clears the previous editor-only preview. If a shader compiles incorrectly, the diagnostics appear in the Console and the previous valid program is retained by the live-reload path.</p>
+        </div>
+      </section>
+
+      <section id="export">
+        <h2>Export and distribution</h2>
+        <p class="sec-sub">The editor can hand the project to the same capture and packaging systems used by the command line.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Menu action</th><th>Result</th></tr></thead>
+            <tbody>
+              <tr><td><strong>File → Export MP4…</strong></td><td>Choose an output path and render the show through the capture pipeline. Set the resolution, FPS, and optional audio source in the export dialog.</td></tr>
+              <tr><td><strong>File → Package Project…</strong></td><td>Create an <code>.nsp</code> asset package from the project and its dependencies.</td></tr>
+              <tr><td><strong>File → Export Distribution…</strong></td><td>Assemble the package, engine executable, and a <code>launch.bat</code> with the correct command-line switches, then create a ZIP for sharing.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="code" data-lang="bash">
+          <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">equivalent command-line playback</span><span class="lang">bash</span></div>
+          <pre>./build/Release/ns_demo.exe --pack data/my_show.nsd --output MyShow.nsp
+./build/Release/ns_demo.exe --play MyShow.nsp</pre>
+        </div>
+      </section>
+
+      <section id="workflow">
+        <h2>Recommended authoring loop</h2>
+        <ol>
+          <li>Open the project and load its track. Let automatic BPM detection establish the beat grid.</li>
+          <li>Press <kbd>F</kbd> in Timeline to fit the whole show, then zoom into the section you are editing.</li>
+          <li>Select a scene from the scene list and tune its Camera Rig, transitions, nodes, and text in the Inspector.</li>
+          <li>Use NSD Commands for anything not covered by a specialized control; keep the generated source small and validate before inserting.</li>
+          <li>Drop shaders, models, images, or textures onto the appropriate panel and inspect compile/load messages in Console.</li>
+          <li>Save the <code>.nsd</code>, run a short MP4 preview, then package the final project for distribution.</li>
+        </ol>
+        <div class="callout tip">
+          <span class="ct-label">Reference</span>
+          <p>For the underlying language and all command forms, continue to <a href="dsl.html">Scripting DSL →</a>. For camera parameters, see <a href="cameras.html">Camera Rigs →</a>; for packaged playback, see <a href="packaging.html">VFS &amp; Packaging →</a>.</p>
+        </div>
+      </section>
+
+      <nav id="pager" class="pager" aria-label="Next page"></nav>
+    </div>
+  </main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

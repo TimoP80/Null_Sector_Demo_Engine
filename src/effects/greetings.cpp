@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// NULL SECTOR // GHOST IN THE MACHINE - greetings poster + credits driver.
+// NULL SECTOR // DEMO ENGINE - greetings poster + credits driver.
 // See greetings.hpp for the composition notes. The driver renders three
 // fullscreen/quad passes for the poster (backdrop, wordmark, group marks)
 // and one atlas-text pass for the credits roll, all against the shared
@@ -109,7 +109,7 @@ void GreetingsFX::renderGreetings(EffectContext& ctx, float secT) {
     // poster text read as unreadable.
     const struct { const char* name; int style; float seed; float tint; float pop; } groups[6] = {
       { "NULL SECTOR",          0, 0.10f, 0.0f, 0.08f },
-      { "GHOST IN THE MACHINE", 2, 0.55f, 0.0f, 0.13f },
+      { "NULL SECTOR DEMO ENGINE", 2, 0.55f, 0.0f, 0.13f },
       { "THE INNER MACHINE",    1, 0.72f, 0.0f, 0.18f },
       { "QUANTUM TUNNEL",       3, 0.31f, 0.0f, 0.23f },
       { "NEURAL NETWORK",       4, 0.87f, 0.0f, 0.28f },
@@ -192,7 +192,7 @@ void GreetingsFX::renderCredits(EffectContext& ctx, float secT) {
     creditProg_->set1f("uWhite", 1.0f);
     const TextLine lines[6] = {
       { "NULL SECTOR", -1.0f, 0.1f },
-      { "GHOST IN THE MACHINE", -1.0f, 0.2f },
+      { "NULL SECTOR DEMO ENGINE", -1.0f, 0.2f },
       { "", -1.0f, 0.0f },
       { "MUSIC // THE MACHINE", -1.0f, 0.3f },
       { "CODE // THE MACHINE", -1.0f, 0.3f },

@@ -3,7 +3,7 @@
 // INTRO SYSTEM 9 - LogoAssembler: the 0:20 reveal. A large circular scanner
 // expands while the background darkens and the "NULL SECTOR" wordmark
 // assembles from fragmented geometry (never fades - every fragment hashes to
-// a scatter offset that converges as uAsmb grows). "Ghost In The Machine"
+// a scatter offset that converges as uAsmb grows). "Null Sector Demo Engine"
 // constructs underneath with a scan sweep. All letters are sampled from the
 // font atlas, so the wordmark shares the engine's exact glyph style.
 //
@@ -57,12 +57,12 @@ float glyphDil(int code, vec2 luv, vec2 off) {
 }
 
 /** draw one centered line of atlas glyphs, per-char staggered assembly */
-void wordLine(vec2 p, int n, int codes[19], float charW, float charH,
+void wordLine(vec2 p, int n, int codes[23], float charW, float charH,
               float cy, float stagger, float asmb, vec3 tint, float seedOff) {
   float total = float(n) * charW;
   float x0 = -total * 0.5;
 
-  for (int i = 0; i < 19; i++) {
+  for (int i = 0; i < 23; i++) {
     if (i >= n) continue;
     float gx = x0 + float(i) * charW;
     if (p.x < gx || p.x > gx + charW) continue;
@@ -152,25 +152,25 @@ void main() {
     g_col += vec3(0.3, 0.8, 1.0) * exp(-td * 300.0) * uScan * 0.6;
   }
 
-  // --- wordmark: NULL SECTOR (11 chars) + GHOST IN THE MACHINE (19 chars) ----
-  int word[19];
-  for (int i = 0; i < 19; i++) word[i] = 32;
+  // --- wordmark: NULL SECTOR (11 chars) + NULL SECTOR DEMO ENGINE (23 chars) ----
+  int word[23];
+  for (int i = 0; i < 23; i++) word[i] = 32;
   word[0] = 78; word[1] = 85; word[2] = 76; word[3] = 76; word[4] = 32;
   word[5] = 83; word[6] = 69; word[7] = 67; word[8] = 84; word[9] = 79; word[10] = 82;
 
-  int sub[19];
-  for (int i = 0; i < 19; i++) sub[i] = 32;
-  sub[0] = 71; sub[1] = 72; sub[2] = 79; sub[3] = 83; sub[4] = 84; sub[5] = 32;
-  sub[6] = 73; sub[7] = 78; sub[8] = 32;
-  sub[9] = 84; sub[10] = 72; sub[11] = 69; sub[12] = 32;
-  sub[13] = 77; sub[14] = 65; sub[15] = 67; sub[16] = 72; sub[17] = 73; sub[18] = 78;
+  int sub[23];
+  for (int i = 0; i < 23; i++) sub[i] = 32;
+  sub[0] = 78; sub[1] = 85; sub[2] = 76; sub[3] = 76; sub[4] = 32;
+  sub[5] = 83; sub[6] = 69; sub[7] = 67; sub[8] = 84; sub[9] = 79; sub[10] = 82; sub[11] = 32;
+  sub[12] = 68; sub[13] = 69; sub[14] = 77; sub[15] = 79; sub[16] = 32;
+  sub[17] = 69; sub[18] = 78; sub[19] = 71; sub[20] = 73; sub[21] = 78; sub[22] = 69;
 
   float subAsmb = sat01((uAsmb - 0.35) / 0.65);
 
   // the wordmark sits near the screen center; apply zoom toward it
   vec2 wp = zp - uParallax * 0.2;
   wordLine(wp, 11, word, 0.092, 0.092, 0.06, 0.045, uAsmb, vec3(0.0, 0.8, 1.0), 1.0);
-  wordLine(wp, 19, sub, 0.042, 0.042, -0.18, 0.03, subAsmb, vec3(0.3, 0.85, 1.0), 2.0);
+  wordLine(wp, 23, sub, 0.036, 0.036, -0.18, 0.03, subAsmb, vec3(0.3, 0.85, 1.0), 2.0);
 
   // dark halo behind the wordmark first (max contrast), then bright layer
   col *= 1.0 - clamp(g_dark, 0.0, 1.0) * 0.85;

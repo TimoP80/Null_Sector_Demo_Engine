@@ -14,7 +14,7 @@
 
 <div class="topbar">
   <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
-  <span class="topbar-title">GHOST IN THE MACHINE</span>
+  <span class="topbar-title">NULL SECTOR DEMO ENGINE</span>
 </div>
 
 <div class="shell">
@@ -231,13 +231,13 @@ shader file not found: …/shaders/lit.frag (frag 'lit.frag', searched …/shade
           <pre>[MAIN] no WAV/MP3 track found - the show will run silent (no built-in synth)
 [AUDIO] no track file - running silent (drop a WAV/MP3 to add music)</pre>
         </div>
-        <p class="sec-sub" style="margin-top:16px">The shell searches, in order: the <code>--track=FILE</code> override, then common names in the current directory and the executable's directory — <code>ghostinthemachine.mp3</code>, <code>audio.mp3</code>, <code>assets/audio.mp3</code>, and the <code>.wav</code> variants.</p>
+        <p class="sec-sub" style="margin-top:16px">The shell searches, in order: the <code>--track=FILE</code> override, then common names in the current directory and the executable's directory — <code>nullsectordemoengine.mp3</code>, <code>audio.mp3</code>, <code>assets/audio.mp3</code>, and the <code>.wav</code> variants.</p>
         <div class="tbl-wrap">
           <table class="tbl">
             <thead><tr><th>Fix</th><th>Command</th></tr></thead>
             <tbody>
               <tr><td>Point at a specific file</td><td><code>./ns_demo.exe --track=music/ghost.mp3</code></td></tr>
-              <tr><td>Drop a track beside the exe</td><td>Name it <code>audio.mp3</code> or <code>ghostinthemachine.wav</code></td></tr>
+              <tr><td>Drop a track beside the exe</td><td>Name it <code>audio.mp3</code> or <code>nullsectordemoengine.wav</code></td></tr>
               <tr><td>Run deliberately silent</td><td><code>./ns_demo.exe --no-track</code></td></tr>
               <tr><td>Verify decode headlessly</td><td><code>./ns_demo.exe --smoke-audio --track=music.mp3</code></td></tr>
             </tbody>

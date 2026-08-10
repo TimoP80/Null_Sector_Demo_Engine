@@ -420,7 +420,29 @@ private:
       advance();
       skipEq();
       const Value v = parseValue();
-      cmd.opts.set(key) = v;
+      if (cmd.name == "text" && key == "text" && v.isStr()) {
+        // Text is the one scene option where an unquoted value containing
+        // spaces is unambiguous and especially common in the editor. Accept
+        // `text title { text HELLO WORLD pos (...) }` as well as the canonical
+        // quoted form. Stop at a known following text option so compact
+        // one-line setup commands remain parseable.
+        std::string text = v.asStr();
+        const auto isTextOption = [](const std::string& option) {
+          return option == "pos" || option == "euler" || option == "scale" ||
+                 option == "visible" || option == "layer" || option == "tag" ||
+                 option == "text" || option == "size" || option == "style" ||
+                 option == "color" || option == "opacity" || option == "align";
+        };
+        while ((cur_.kind == Tok::Ident || cur_.kind == Tok::Str) &&
+               !(cur_.kind == Tok::Ident && isTextOption(cur_.text))) {
+          if (!text.empty()) text += ' ';
+          text += cur_.text;
+          advance();
+        }
+        cmd.opts.set(key) = Value(std::move(text));
+      } else {
+        cmd.opts.set(key) = v;
+      }
     } else if (cur_.kind == Tok::Number || cur_.kind == Tok::Time) {
       // keyframe row: TIME VALUE [interp]
       KeyframeRow row;

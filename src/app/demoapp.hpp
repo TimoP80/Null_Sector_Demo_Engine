@@ -105,14 +105,17 @@ public:
 
   // --- effect library (the editor's hierarchy) ------------------------------
   /** show an effect instance now (creates it if needed); safe from the UI */
-  void editorShowEffect(const std::string& name) { showEffect(name, Value::null()); }
+  /** Show an effect for editor preview only. Preview effects are cleared when
+   *  the active scripted scene changes, so a picked shader cannot leak into a
+   *  different scene. */
+  void editorShowEffect(const std::string& name);
   /** force-recompile every cached program whose source changed on disk (the
    *  editor's shader scratch calls this after writing a file, so the live
    *  preview updates on the next frame without waiting for the watcher
    *  cadence; a broken edit keeps the previous program + logs, like reload) */
   void reloadShaders() { shaders_.reloadAll(); }
   /** hide an effect instance now; safe from the UI */
-  void editorHideEffect(const std::string& name) { hideEffect(name); }
+  void editorHideEffect(const std::string& name);
   /** load a material by name (data/materials/NAME.json); safe from the UI */
   void editorLoadMaterial(const std::string& name) { loadMaterial(name); }
   /** apply a post preset by name (data/post/NAME.json); safe from the UI */
@@ -217,6 +220,10 @@ private:
   std::unique_ptr<PostStack> post_;   // needs the Renderer at ctor - built in init()
   ModelRenderer modelRenderer_;
   CineText* cineText_ = nullptr;
+  // Per-project font atlases, keyed by the virtual font path. The default
+  // atlas remains in Input::assets; named text nodes load lazily and share the
+  // cached GL texture across the scene.
+  std::map<std::string, std::unique_ptr<Assets>> fontCache_;
 
   Input in_;
   EffectContext ctx_;
@@ -226,6 +233,7 @@ private:
   std::map<std::string, std::unique_ptr<Effect>> effects_;
   std::map<std::string, std::unique_ptr<CameraRig>> rigs_;
   std::vector<std::string> activeEffects_;
+  std::vector<std::string> editorPreviewEffects_;
   std::string activeScene_;
   std::string activeCamera_ = "default";
   std::vector<SceneSection> sections_;
@@ -315,11 +323,13 @@ private:
   void dispatch(const Cmd& cmd, float at = -1.0f);
   void showEffect(const std::string& name, const Value& opts);
   void hideEffect(const std::string& name);
+  void clearEditorPreviewEffects();
   void activateScene(const std::string& name);
   void setCamera(const Cmd& cmd);
   void loadPreset(const std::string& name);
   void loadModelFile(const std::string& file);
   void loadMaterial(const std::string& name);
+  const Assets* fontForText(const std::string& font);
 
   // scene graph building
   void cmdSceneNode(const Cmd& cmd);

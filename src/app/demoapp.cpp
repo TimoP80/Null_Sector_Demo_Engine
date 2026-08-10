@@ -144,6 +144,10 @@ void DemoApp::rebuildTargets() {
 }
 
 void DemoApp::buildSections() {
+  // Set the tempo before deriving beat positions. This matters when the editor
+  // changes the project BPM after loading a track: section times are already
+  // parsed at the new tempo, so their beat indices must use that same tempo.
+  in_.timeline->setBpm(script_.bpm());
   // convert the script-engine sections into the engine timeline's schedule
   std::vector<SectionInfo> secs;
   const float bs = in_.timeline->beatSec();
@@ -163,7 +167,6 @@ void DemoApp::buildSections() {
   }
   if (!secs.empty()) {
     in_.timeline->setSections(std::move(secs));
-    in_.timeline->setBpm(script_.bpm());
   }
   sections_ = script_.sections();
 }
@@ -252,6 +255,15 @@ void DemoApp::update(float show, float dt) {
 
 void DemoApp::seek(float t) {
   catchUpSeek(t);
+  // A script reload clears activeScene_ and then seeks back to the current
+  // transport position. When that position is exactly the section start,
+  // catchUpSeek() has no forward distance to cross, so the scene-entry event
+  // is otherwise skipped and the editor can show an empty/stale scene after
+  // pressing Apply. Re-establish the containing scene explicitly for exact
+  // boundary seeks as well.
+  if (activeScene_.empty()) {
+    if (const SceneSection* sec = sectionContaining(t)) activateScene(sec->name);
+  }
   lastShow_ = -1e9f;  // force the next update to re-arm
 }
 
@@ -371,9 +383,11 @@ void DemoApp::dispatch(const Cmd& cmd, float at) {
     }
   } else if (n == "shader") {
     if (!cmd.args.empty()) {
-      Value p = Value::object();
+      Value p = cmd.opts.isObj() ? cmd.opts : Value::object();
       p.set("frag") = cmd.args[0];
       p.set("handoff") = Value(cmd.b("handoff", false));
+      if (!p.get("useFont").isNull() || !p.get("text").isNull())
+        p.set("useFont") = Value(true);
       showEffect("quad:" + cmd.args[0].asStr(), p);
     }
   } else if (n == "camera") {
@@ -499,20 +513,31 @@ Effect* DemoApp::findEffect(const std::string& name) {
 void DemoApp::showEffect(const std::string& name, const Value& opts) {
   Effect* e = instance(name, opts);
   if (!e) return;
-  if (std::find(activeEffects_.begin(), activeEffects_.end(), name) != activeEffects_.end()) return;
 
-  // apply per-show params
+  // Apply per-show params even when the same effect instance is already active:
+  // two timeline cues may reuse one shader with different font atlases.
   if (auto* sfx = dynamic_cast<SceneFX*>(e)) {
     sfx->mode = opts.get("mode").asFloat(sfx->mode);
     if (!opts.get("renderScale").isNull()) sfx->renderScale = opts.get("renderScale").asFloat();
+    if (!opts.get("font").isNull()) sfx->setFontFile(opts.get("font").asStr());
+    if (!opts.get("texture").isNull()) sfx->setTextureFile(opts.get("texture").asStr(), "uFillTexture", 1);
+    if (!opts.get("textureMix").isNull()) sfx->extraUniforms["uTextureMix"] = opts.get("textureMix").asFloat(1);
+    if (!opts.get("textureScale").isNull()) sfx->extraUniforms["uTextureScale"] = opts.get("textureScale").asFloat(1);
+    if (!opts.get("textureScroll").isNull()) sfx->extraUniforms["uTextureScroll"] = opts.get("textureScroll").asFloat(0);
+    if (opts.get("useFont").asBool(false) || !opts.get("text").isNull()) sfx->useFont(true);
   }
+  if (std::find(activeEffects_.begin(), activeEffects_.end(), name) != activeEffects_.end()) return;
   if (auto* tfx = dynamic_cast<TunnelFX*>(e)) tfx->mode = opts.get("mode").asFloat(tfx->mode);
   if (auto* pfx = dynamic_cast<ParticleStormFX*>(e)) pfx->mode = opts.get("mode").asFloat(pfx->mode);
   if (auto* gfx = dynamic_cast<GreetingsFX*>(e)) gfx->mode = opts.get("mode").asFloat(gfx->mode);
 
-  // fullscreen scenes replace each other unless `keep` is set
+  // fullscreen scenes replace each other unless `keep` is set. Clear the
+  // vector directly: erasing from activeEffects_ inside a range-for used to
+  // invalidate its iterator, leaving some old shader effects active and
+  // allowing them to leak into later scenes.
   if (!opts.get("keep").asBool(false)) {
-    for (const auto& old : activeEffects_) hideEffect(old);
+    activeEffects_.clear();
+    editorPreviewEffects_.clear();
   }
   activeEffects_.push_back(name);
   Log::info("FX", "show " + name);
@@ -523,9 +548,41 @@ void DemoApp::hideEffect(const std::string& name) {
   if (it != activeEffects_.end()) activeEffects_.erase(it);
 }
 
+void DemoApp::clearEditorPreviewEffects() {
+  for (const auto& name : editorPreviewEffects_) hideEffect(name);
+  editorPreviewEffects_.clear();
+}
+
+void DemoApp::editorShowEffect(const std::string& name) {
+  if (name.empty()) return;
+  // Editor previews are replacements, not persistent scene content. Clear the
+  // previous preview bookkeeping before showing the newly selected shader;
+  // showEffect() also removes any scripted fullscreen effect it replaces.
+  clearEditorPreviewEffects();
+  showEffect(name, Value::null());
+  if (std::find(activeEffects_.begin(), activeEffects_.end(), name) != activeEffects_.end())
+    editorPreviewEffects_.push_back(name);
+}
+
+void DemoApp::editorHideEffect(const std::string& name) {
+  hideEffect(name);
+  editorPreviewEffects_.erase(
+      std::remove(editorPreviewEffects_.begin(), editorPreviewEffects_.end(), name),
+      editorPreviewEffects_.end());
+}
+
 void DemoApp::activateScene(const std::string& name) {
   const SceneBundle* b = script_.scene(name);
   if (!b) return;
+  if (activeScene_ != name) {
+    clearEditorPreviewEffects();
+    // Scene-node commands are scene-owned. Reusing the same graph across
+    // activations made meshes, sprites and text from the previous scene stay
+    // renderable after the new scene was entered.
+    scene_.clear();
+    anims_.stopAll();
+    imageTransitions_.clear();
+  }
   activeScene_ = name;
   dispatchCmds(b->setup);  // camera / show / fade / post ...
   Log::info("SCENE", "activate " + name);
@@ -534,6 +591,40 @@ void DemoApp::activateScene(const std::string& name) {
 // ---------------------------------------------------------------------------
 // scene graph building
 // ---------------------------------------------------------------------------
+const Assets* DemoApp::fontForText(const std::string& font) {
+  if (font.empty() || !in_.assets) return in_.assets;
+
+  std::string path = font;
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(path, ec) || ec) {
+    ec.clear();
+    const std::string projectFont = "assets/fonts/" + font;
+    if (runtimeFS().exists(font)) path = font;
+    else if (runtimeFS().exists(projectFont)) path = projectFont;
+    else if (std::filesystem::is_regular_file(projectFont, ec) && !ec)
+      path = projectFont;
+    else {
+      Log::warn("TEXT", "font not found: " + font + " (using default font)");
+      fontCache_.emplace(font, nullptr);
+      return in_.assets;
+    }
+  }
+
+  auto it = fontCache_.find(path);
+  if (it != fontCache_.end())
+    return it->second ? it->second.get() : in_.assets;
+
+  auto atlas = std::make_unique<Assets>(buildTrueTypeFontAtlas(path));
+  if (!atlas->fontTex.tex) {
+    Log::warn("TEXT", "font load failed: " + path + " (using default font)");
+    fontCache_.emplace(path, nullptr);
+    return in_.assets;
+  }
+  const Assets* result = atlas.get();
+  fontCache_.emplace(path, std::move(atlas));
+  return result;
+}
+
 void DemoApp::cmdSceneNode(const Cmd& cmd) {
   const bool imageCmd = cmd.name == "image";
   std::string nodeName = cmd.args.empty() ? cmd.name : cmd.args[0].asStr();
@@ -609,6 +700,7 @@ void DemoApp::cmdSceneNode(const Cmd& cmd) {
       TextData td;
       td.text = cmd.opts.get("text").asStr(cmd.args.empty() ? "" : cmd.args[0].asStr());
       td.sizePx = cmd.opts.get("size").asInt(24);
+      td.font = cmd.opts.get("font").asStr();
       td.style = cmd.opts.get("style").asStr("neon");
       if (cmd.opts.get("color").toFloats(f, 4) == 4) td.color = {f[0], f[1], f[2], f[3]};
       td.opacity = cmd.opts.get("opacity").asFloat(1);
@@ -872,7 +964,10 @@ void DemoApp::reloadScript() {
     script_.build(editor_);
     buildSections();
     activeScene_.clear();
+    clearEditorPreviewEffects();
     activeEffects_.clear();
+    scene_.clear();
+    anims_.stopAll();
     imageTransitions_.clear();
     catchUpFloor_ = -1e9f;
     editor_.seek(0);
@@ -1310,8 +1405,9 @@ void DemoApp::renderSpritesAndText() {
     else if (td->style == "dissolve") style = CineStyle::Dissolve;
     else if (td->style == "chrome") style = CineStyle::Chrome;
     else if (td->style == "outline") style = CineStyle::Outline;
+    const Assets* textFont = fontForText(td->font);
     cineText_->line(ctx_, td->text, n->pos[1], td->sizePx, style, td->opacity, 0, 0.5f, 1.0f, 0,
-                    n->pos[0] * 0.5f);
+                    n->pos[0] * 0.5f, textFont);
   }
 }
 

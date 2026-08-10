@@ -55,11 +55,24 @@ void collectCmdRefs(const Cmd& c, std::vector<PackRef>& out) {
     }
   } else if (c.name == "shader" && !c.args.empty()) {
     out.push_back({"shaders/" + c.args[0].asStr(), "shader"});
+    const std::string font = c.s("font");
+    if (!font.empty())
+      out.push_back({font.find('/') == std::string::npos ? "assets/fonts/" + font : font,
+                     "font"});
+    const std::string texture = c.s("texture");
+    if (!texture.empty())
+      out.push_back({texture.find('/') == std::string::npos ? "data/textures/" + texture : texture,
+                     "texture"});
   } else if (c.name == "post" && c.args.size() >= 2 && c.args[0].asStr() == "preset") {
     out.push_back({"data/post/" + c.args[1].asStr() + ".json", "post"});
   } else if (c.name == "mesh") {
     const std::string model = c.s("model", c.args.empty() ? "" : c.args[0].asStr());
     if (!model.empty()) out.push_back({"data/models/" + model, "model"});
+  } else if (c.name == "text") {
+    const std::string font = c.s("font");
+    if (!font.empty())
+      out.push_back({font.find('/') == std::string::npos ? "assets/fonts/" + font : font,
+                     "font"});
   } else if (c.name == "sprite" || c.name == "image") {
     std::string tex = c.s("tex");
     if (tex.empty()) {

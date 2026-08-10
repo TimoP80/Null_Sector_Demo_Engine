@@ -138,9 +138,14 @@ Assets buildTrueTypeFontAtlas(const std::string& path) {
     }
   }
 
+  // The atlas is deliberately rasterized at a large cell size and sampled
+  // down to the requested caption size. Mipmapping that atlas adds a second
+  // low-pass filter on top of the glyph's antialiasing and makes editor/runtime
+  // typography visibly soft, especially around 20-40px. Bilinear filtering
+  // keeps the antialiased edges while preserving the glyph detail.
   a.fontTex = Texture::fromRGBA(atlasW, atlasH, px.data(),
-                                {::gl::LINEAR_MIPMAP_LINEAR, ::gl::LINEAR,
-                                 ::gl::CLAMP_TO_EDGE, true});
+                                {::gl::LINEAR, ::gl::LINEAR,
+                                 ::gl::CLAMP_TO_EDGE, false});
   a.fontMetrics.cols = cols;
   a.fontMetrics.rows = rows;
   a.fontMetrics.cellW = cell;
@@ -205,7 +210,16 @@ bool loadLogoTexture(LogoAsset& out) {
 bool loadPngAsset(const std::string& file, Texture& out) {
   std::vector<unsigned char> px;
   int w = 0, h = 0;
-  if (!loadPngRGBA("assets/" + file, px, w, h)) return false;
+  // Accept both the historical asset-relative form ("logo.png") and a
+  // production virtual/absolute path ("data/textures/logo.png" or a file
+  // dropped into the editor). This keeps Shader Lab texture fills packageable
+  // without changing existing callers.
+  const std::filesystem::path p(file);
+  const std::string path = p.is_absolute() || file.rfind("assets/", 0) == 0 ||
+                                   file.rfind("data/", 0) == 0
+                               ? file
+                               : "assets/" + file;
+  if (!loadPngRGBA(path, px, w, h)) return false;
   out = Texture::fromRGBA(w, h, px.data(),
                           {::gl::LINEAR, ::gl::LINEAR, ::gl::CLAMP_TO_EDGE, false});
   std::printf("[ASSETS] %s loaded (%dx%d)\n", file.c_str(), w, h);

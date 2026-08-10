@@ -1,5 +1,5 @@
 /* ============================================================================
-   NULL SECTOR // GHOST IN THE MACHINE — docs runtime
+   NULL SECTOR // DEMO ENGINE — docs runtime
    - builds the sidebar nav from a single config
    - syntax-highlights code blocks (no external deps)
    - copy buttons, mobile nav, active-link highlighting, prev/next pager
@@ -17,6 +17,7 @@
       { href: "troubleshooting.html", num: "⚠", label: "Troubleshooting" }
     ]},
     { group: "Authoring", items: [
+      { href: "editor.html", num: "ED", label: "Demo Editor" },
       { href: "dsl.html", num: "02", label: "Scripting DSL" },
       { href: "timeline.html", num: "03", label: "Timeline" },
       { href: "animation.html", num: "04", label: "Animation" },
@@ -50,7 +51,7 @@
   if (sidebar) {
     var html = '<a class="brand" href="index.html">' +
       '<span class="brand-mark">NS</span>' +
-      '<span class="brand-name">GHOST IN<br><small>THE MACHINE</small></span></a>' +
+      '<span class="brand-name">NULL SECTOR<br><small>DEMO ENGINE</small></span></a>' +
       '<nav class="nav" aria-label="Documentation">';
     var cur = currentPage();
     NAV.forEach(function (g) {
@@ -281,10 +282,10 @@
     window.addEventListener("beforeprint", termFull);
     var lines = [
       { t: "$ ./ns_demo --demo=data/demo.nsd", c: "dim" },
-      { t: "[MAIN] NULL SECTOR // GHOST IN THE MACHINE", c: "dim" },
+      { t: "[MAIN] NULL SECTOR // DEMO ENGINE", c: "dim" },
       { t: "[AUDIO] no track file - running silent (drop a WAV/MP3 to add music)", c: "dim" },
       { t: "" },
-      { t: "demo \"GHOST IN THE MACHINE\" {", c: "hl" },
+      { t: "demo \"NULL SECTOR DEMO ENGINE\" {", c: "hl" },
       { t: "    bpm 216", c: "" },
       { t: "    duration 125", c: "" },
       { t: "}", c: "hl" },

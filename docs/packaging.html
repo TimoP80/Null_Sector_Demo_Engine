@@ -14,7 +14,7 @@
 
 <div class="topbar">
   <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
-  <span class="topbar-title">GHOST IN THE MACHINE</span>
+  <span class="topbar-title">NULL SECTOR DEMO ENGINE</span>
 </div>
 
 <div class="shell">
@@ -81,10 +81,10 @@ data/neural_dust/track.mp3</pre>
 ./build/Release/ns_demo.exe --editor
 
 # Create a package from a production (discover all referenced assets)
-./build/Release/ns_demo.exe --pack data/demo.nsd --output GhostInTheMachine.nsp
+./build/Release/ns_demo.exe --pack data/demo.nsd --output NullSectorDemoEngine.nsp
 
 # Playback: mount the package as the VFS (no data/ directory needed)
-./build/Release/ns_demo.exe --play GhostInTheMachine.nsp</pre>
+./build/Release/ns_demo.exe --play NullSectorDemoEngine.nsp</pre>
         </div>
         <p>Packaging runs headless — no window, no GL — so it works on CI. The production argument is resolved the same way the app resolves <code>--demo</code>, and an explicit <code>--track=FILE</code> is honored. <code>--root=PATH</code> points the packer at a repo root other than the current directory.</p>
       </section>
@@ -127,7 +127,7 @@ File data the bytes, back to back (method 0 = stored as-is, method 1 =
           <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">stderr</span><span class="lang">text</span></div>
           <pre>Null Sector Production Packer
 ------------------------------
-Production: GHOST IN THE MACHINE
+Production: NULL SECTOR DEMO ENGINE
 Source:     data/demo.nsd
 
 Assets:
@@ -151,7 +151,7 @@ Compression: 7.4%
            3.3 MB -> 3.3 MB
 
 Created:
-  GhostInTheMachine.nsp</pre>
+  NullSectorDemoEngine.nsp</pre>
         </div>
       </section>
 

@@ -24,6 +24,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -128,6 +129,7 @@ static void tlFitApply(float dur, float& zoom, float& t0, float& fitZoom,
 // editor registers itself here (constructor) and forwards drops into its
 // per-frame queue. Only one editor exists at a time.
 DemoEditor* g_osDropTarget = nullptr;
+DemoEditor* g_flyCursorTarget = nullptr;
 
 // the effect name the quad:/shadertoy: dispatch builds for a shader path -
 // shared by pickBrowseFile and the OS-drop success check so the two can
@@ -168,6 +170,89 @@ static const ImU32 kDim = c32(133, 146, 167);
 static const ImU32 kFaint = c32(86, 98, 121);
 static const ImU32 kPanel = c32(11, 15, 22);
 static const ImU32 kLine = c32(29, 38, 52);
+
+// Text-node authoring helpers are defined alongside the other document patch
+// helpers below inspectScene; the viewport needs the position patch before
+// that section is compiled.
+namespace {
+bool patchDocumentTextPosition(EditorDocument& doc, const std::string& sceneName,
+                               const std::string& nodeName, const V3& pos);
+}
+
+// Camera rig types accepted by ScriptParser. Keep the editor selector aligned
+// with the runtime list so authors do not have to remember rig spelling.
+static constexpr const char* kCameraRigTypes[] = {
+    "static", "drift", "fly", "nave", "orbit", "spiral", "hover",
+    "city", "descend", "path"};
+static constexpr int kCameraRigTypeCount =
+    (int)(sizeof(kCameraRigTypes) / sizeof(kCameraRigTypes[0]));
+
+struct NsdCommandInfo {
+  const char* name;
+  const char* signature;
+  const char* description;
+  const char* source;
+};
+
+// Keep this list aligned with ScriptParser's command table. It is deliberately
+// data-driven: adding a parser command here gives the editor a usable template
+// immediately, while the source field remains editable for advanced options.
+static constexpr NsdCommandInfo kNsdCommands[] = {
+    {"show", "show EFFECT_OR_SCENE", "Activate an effect or scene.", "show intro"},
+    {"hide", "hide EFFECT", "Remove an active effect.", "hide intro"},
+    {"load", "load TYPE ASSET", "Load a shadertoy, material, model, plugin, or effect.", "load material chrome"},
+    {"shader", "shader FILE { options }", "Run a fullscreen fragment shader.", "shader shaderlab_glitch.frag"},
+    {"camera", "camera NAME { rig ... }", "Select or define the active camera rig.", "camera MainCam { rig static; pos (0,0,2); target (0,0,0); fov 55 }"},
+    {"play", "play music", "Emit a music/playback cue.", "play music"},
+    {"fade", "fade in|out SECONDS", "Fade the presented image in or out.", "fade in 1"},
+    {"transition", "transition TYPE SECONDS", "Start a fade or bloom transition.", "transition fade 1"},
+    {"post", "post { option value }", "Change legacy post-processing parameters.", "post { bloom 0.8; glitch 0.1; exposure 1 }"},
+    {"anim", "anim NAME TARGET.PROPERTY", "Create a keyframed animation channel.", "anim captionPos caption.pos linear { 0 (0,0,0); 1 (0,0.2,0) }"},
+    {"marker", "marker NAME", "Add a named production marker.", "marker DROP"},
+    {"speed", "speed VALUE", "Change director playback speed.", "speed 1"},
+    {"loop", "loop", "Toggle looping of the show.", "loop"},
+    {"jump", "jump SECONDS", "Seek the show transport.", "jump 0"},
+    {"mesh", "mesh NAME { model ... }", "Create a reusable 3D model node.", "mesh terrain { model terrain.obj; pos (0,0,0); meshScale 1 }"},
+    {"sprite", "sprite NAME { tex ... }", "Create a textured sprite node.", "sprite logo { tex ghost_logo.png; pos (0,0,0); size (2,1,1) }"},
+    {"image", "image FILE { transition ... }", "Create an image node with an entrance transition.", "image poster.png { transition fade; duration 1 }"},
+    {"text", "text NAME { text ... }", "Create a bitmap-font text node.", "text caption { text \"HELLO WORLD\"; pos (0,0.2,0); size 32; style neon }"},
+    {"light", "light NAME { ... }", "Create a point, directional, or spot light.", "light Key { type point; pos (0,2,1); color (1,0.8,0.6,1); intensity 2 }"},
+    {"particles", "particles NAME { ... }", "Create a GPU particle node.", "particles dust { frag particles.frag; count 5000; renderScale 0.5 }"},
+    {"empty", "empty NAME { ... }", "Create an empty scene graph node.", "empty Group { pos (0,0,0) }"},
+    {"postnode", "postnode NAME { preset ... }", "Create a scene post-effect node.", "postnode Grade { preset cinematic }"},
+    {"quadnode", "quadnode NAME { frag ... }", "Create a shader quad scene node.", "quadnode Background { frag passthrough.frag; handoff false }"},
+};
+static constexpr int kNsdCommandCount = (int)(sizeof(kNsdCommands) / sizeof(kNsdCommands[0]));
+
+static bool parseEditorCommand(const std::string& source, int target, Cmd& out,
+                               std::string& error) {
+  try {
+    Script parsed;
+    if (target == 0) {
+      parsed = ScriptParser::parse(
+          "demo \"EDITOR COMMAND\" { duration 1 }\n"
+          "scene CommandTarget {\n" + source + "\n}\n", "editor command");
+      if (parsed.scenes.empty() || parsed.scenes[0].setup.size() != 1) {
+        error = "enter exactly one scene-setup command";
+        return false;
+      }
+      out = parsed.scenes[0].setup[0];
+    } else {
+      parsed = ScriptParser::parse(
+          "demo \"EDITOR COMMAND\" { duration 1 }\n"
+          "at 0 {\n" + source + "\n}\n", "editor command");
+      if (parsed.main.empty() || parsed.main[0].cmds.size() != 1) {
+        error = "enter exactly one timeline command";
+        return false;
+      }
+      out = parsed.main[0].cmds[0];
+    }
+    return true;
+  } catch (const std::exception& e) {
+    error = e.what();
+    return false;
+  }
+}
 
 static const ImU32 kTrackPalette[8] = { kPhosphor, kHot, kAmber, kBlue, kViolet, c32(255, 170, 90), c32(120, 220, 255), c32(220, 140, 255) };
 
@@ -284,6 +369,7 @@ DemoEditor::DemoEditor(const Wiring& w) : w_(w) {
   smokeAudio_ = std::getenv("NS_EDITOR_AUDIO_SMOKE") != nullptr;  smokeDoc_ = std::getenv("NS_EDITOR_DOC_SMOKE") != nullptr;
   smokeExport_ = std::getenv("NS_EDITOR_EXPORT_SMOKE") != nullptr;
   smokePackage_ = std::getenv("NS_EDITOR_PACKAGE_SMOKE") != nullptr;
+  showShaderLab_ = std::getenv("NS_EDITOR_SHADERLAB_SMOKE") != nullptr;
   if (smokePackage_) {
     smokePackagePath_ = std::getenv("NS_EDITOR_PACKAGE_SMOKE");
     if (smokePackagePath_.empty()) smokePackagePath_ = "package_smoke.zip";
@@ -295,11 +381,19 @@ DemoEditor::DemoEditor(const Wiring& w) : w_(w) {
     if (smokeExportSeconds_ <= 0.0f) smokeExportSeconds_ = 3.0f;
   }
   initImGui();
+  shaderLab_.init({w_.r, w_.assets, w_.audio, w_.timeline, w_.shaderDir, w_.assetDir,
+                   w_.dataDir});
 
   // OS-level drag-in: files dropped from Explorer/file managers onto the
   // viewport are queued here and applied at the next frame's drain
   g_osDropTarget = this;
   glfwSetDropCallback(w_.window, &DemoEditor::glfwDropCallback);
+  // ImGui installs its own cursor callback. Chain through it while the editor
+  // is alive so fly-camera relative motion remains available in GLFW's
+  // disabled-cursor mode without taking input away from the rest of ImGui.
+  g_flyCursorTarget = this;
+  previousCursorPos_ = glfwSetCursorPosCallback(
+      w_.window, &DemoEditor::glfwFlyCursorPosCallback);
 
   // console sink: capture every engine/framework log line for the Console panel
   Log::setSink([this](const std::string& line) { pushConsole(line); });
@@ -322,7 +416,12 @@ void DemoEditor::shutdown() {
   // land before we tear down - crash-survival is the whole point of the trail
   if (saveDirty_) flushPendingSave();
   if (!uiUp_) return;
+  shaderLab_.shutdown();
   uiUp_ = false;
+  if (g_flyCursorTarget == this) {
+    glfwSetCursorPosCallback(w_.window, previousCursorPos_);
+    g_flyCursorTarget = nullptr;
+  }
   g_osDropTarget = nullptr;
   Log::setSink(nullptr);
   ImGui_ImplOpenGL3_Shutdown();
@@ -465,6 +564,8 @@ void DemoEditor::buildDefaultLayout(unsigned dockspaceId) {
 
   ImGui::DockBuilderDockWindow("Toolbar", toolbar);
   ImGui::DockBuilderDockWindow("Viewport", center);
+  ImGui::DockBuilderDockWindow("Shader Lab", center);
+  ImGui::DockBuilderDockWindow("NSD Commands", right);
   ImGui::DockBuilderDockWindow("Hierarchy", leftTop);
   ImGui::DockBuilderDockWindow("Assets", leftBottom);
   ImGui::DockBuilderDockWindow("Inspector", right);
@@ -518,6 +619,14 @@ bool DemoEditor::frame() {
   // commit a background audio decode that just finished (kept the UI
   // responsive - the device stop/start swap is a few ms, not the whole file)
   pumpAsyncAudioSwap();
+  // Track restoration happens during construction, before the first frame, so
+  // do not make automatic BPM detection depend on the Timeline panel being
+  // visible. Runtime swaps are rebuilt in pumpAsyncAudioSwap() below.
+  if (w_.audio &&
+      (w_.audio->trackPath() != audioEnvPath_ ||
+       w_.audio->trackFrames() != audioEnvFrames_)) {
+    rebuildAudioEnvelope();
+  }
 
   // MP4 export smoke (NS_EDITOR_EXPORT_SMOKE=path): auto-start one export
   // at boot so CI can prove the capture pipeline (a real track muxes with it)
@@ -565,6 +674,9 @@ bool DemoEditor::frame() {
     }
   }
   captureViewport();
+  shaderLab_.setVisible(showShaderLab_);
+  if (showShaderLab_) shaderLab_.render(w_.director ? w_.director->show : 0.0f,
+                                        dt, std::min(fbW, 960), std::min(fbH, 540));
   pumpExport(dt, fbW, fbH);
 
   // --- UI ---------------------------------------------------------------------
@@ -574,6 +686,32 @@ bool DemoEditor::frame() {
 
   handleKeys();
   drawMenuBar();
+
+  // Scene activation rebuilds the scene graph, invalidating any selected node
+  // pointer from the previous scene. Drop that selection before the hierarchy
+  // or inspector can dereference it. The declaration selection is separate:
+  // authors may edit Scene B while the transport is previewing Scene A, so do
+  // not silently replace selScene_ whenever playback crosses a section. This
+  // also keeps the selected scene stable across an Apply/reload operation.
+  const std::string liveScene = w_.app ? w_.app->activeScene() : std::string();
+  if (liveScene != lastActiveScene_) {
+    if (textNodeDragging_) {
+      // A scene transition invalidates the selected runtime node. Cancel an
+      // in-flight screen-space gesture rather than committing its coordinates
+      // to whichever text node happens to be selected next.
+      doc_.cancelEdit();
+      textNodeDragging_ = false;
+      textDragNodeKey_.clear();
+      textDragMoved_ = false;
+    }
+    selNode_ = nullptr;
+    selEffect_.clear();
+    textEditNodeKey_.clear();
+    if (selScene_.empty() || !doc_.findScene(selScene_)) {
+      if (!liveScene.empty()) selScene_ = liveScene;
+    }
+    lastActiveScene_ = liveScene;
+  }
 
   // fullscreen dock host (must be built BEFORE the dockable panels so the
   // first-frame DockBuilder layout wins and nothing is created floating)
@@ -617,7 +755,7 @@ bool DemoEditor::frame() {
     showAbout_ = false;
   }
   if (ImGui::BeginPopupModal("About Demo Editor", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-    ImGui::TextUnformatted("NULL SECTOR // GHOST IN THE MACHINE");
+    ImGui::TextUnformatted("NULL SECTOR // DEMO ENGINE");
     ImGui::TextDisabled("Demo Editor - dockable data-driven demo authoring");
     ImGui::TextDisabled("ImGui " IMGUI_VERSION " (docking) + GLFW + OpenGL 3.3");
     ImGui::TextDisabled("The show itself is 100%% data-driven: edit data/demo.nsd, ");
@@ -634,6 +772,13 @@ bool DemoEditor::frame() {
   if (showConsole_) drawConsole();
   if (showAssets_) drawAssets();
   if (showProfiler_) drawProfiler();
+  drawNsdCommands();
+  if (showShaderLab_) {
+    shaderLab_.setVisible(true);
+    shaderLab_.draw(w_.director ? w_.director->show : 0.0f);
+    showShaderLab_ = shaderLab_.visible();
+  }
+  if (shaderLab_.takeInsertRequest()) insertShaderLabIntoTimeline();
   drawNewAssetDialog();
   drawNewProjectConfirm();
   if (showCurves_) drawCurveEditor();
@@ -1685,6 +1830,15 @@ bool DemoEditor::frame() {
 // ---------------------------------------------------------------------------
 // keyboard
 // ---------------------------------------------------------------------------
+void DemoEditor::togglePlayback() {
+  // Editor startup is intentionally paused. Start the audio clock only when
+  // the author actually presses Play/Space; this keeps a loaded track from
+  // running ahead while the transport is stopped.
+  if (w_.director && w_.director->paused && w_.audio && !w_.audio->started)
+    w_.audio->start();
+  if (w_.director) w_.director->togglePause();
+}
+
 void DemoEditor::handleKeys() {
   if (flyActive_) return;  // fly mode owns the keyboard (Space is handled there)
   ImGuiIO& io = ImGui::GetIO();
@@ -1709,7 +1863,7 @@ void DemoEditor::handleKeys() {
       !io.KeyAlt)
     fitTimeline();
   if (ImGui::IsKeyPressed(ImGuiKey_Space)) {
-    if (w_.director) w_.director->togglePause();
+    togglePlayback();
   }
   if (ImGui::IsKeyPressed(ImGuiKey_R)) {
     if (w_.director) w_.director->init(0);
@@ -1800,12 +1954,13 @@ void DemoEditor::drawMenuBar() {
     if (ImGui::MenuItem("Redo", "Ctrl+Y", false, doc_.canRedo())) redoDocument();
     ImGui::Separator();
     if (ImGui::MenuItem("Save Document", "Ctrl+S", false, doc_.dirty)) saveDocument();
+    if (ImGui::MenuItem("Insert NSD Command...")) showNsdCommands_ = true;
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("Transport")) {
     const bool playing = w_.director && !w_.director->paused;
     if (ImGui::MenuItem("Play / Pause", "Space")) {
-      if (w_.director) w_.director->togglePause();
+      togglePlayback();
     }
     if (ImGui::MenuItem("Step One Frame", ".")) stepPending_ = true;
     if (ImGui::MenuItem("Restart", "R")) {
@@ -1838,6 +1993,8 @@ void DemoEditor::drawMenuBar() {
     ImGui::MenuItem("Console", nullptr, &showConsole_);
     ImGui::MenuItem("Assets", nullptr, &showAssets_);
     ImGui::MenuItem("Profiler", nullptr, &showProfiler_);
+    ImGui::MenuItem("Shader Lab", nullptr, &showShaderLab_);
+    ImGui::MenuItem("NSD Commands", nullptr, &showNsdCommands_);
     ImGui::MenuItem("Curves", nullptr, &showCurves_);
     // discoverable way to open the drop history without knowing about the
     // Console's right-click (the smoke uses it to render the popup live too)
@@ -1889,7 +2046,7 @@ void DemoEditor::drawToolbar() {
 
   const bool playing = w_.director && !w_.director->paused;
   if (ImGui::Button(playing ? "|| Pause" : "> Play")) {
-    if (w_.director) w_.director->togglePause();
+    togglePlayback();
   }
   ImGui::SameLine();
   if (ImGui::Button("|> Step")) stepPending_ = true;
@@ -2046,6 +2203,96 @@ void DemoEditor::drawViewportPanel() {
         }
       }
       ImGui::EndDragDropTarget();
+    }
+
+    // Text nodes are rendered as normalized 2D overlays by DemoApp. When one
+    // is selected, expose its screen-space anchor directly in the preview so
+    // authors can position it with the same interaction they use in motion-
+    // graphics tools instead of guessing NDC values in the Inspector.
+    SceneNode* textNode =
+        (selNode_ && selNode_->type == NodeType::Text) ? selNode_ : nullptr;
+    if (textNode) {
+      const std::string dragKey =
+          (w_.app ? w_.app->activeScene() : std::string()) + "\x1f" + textNode->name;
+      const float ndcX = textNode->pos[0] * 0.5f;
+      const float ndcY = textNode->pos[1];
+      const ImVec2 anchor(p0.x + (ndcX + 1.0f) * 0.5f * img.x,
+                         p0.y + (1.0f - ndcY) * 0.5f * img.y);
+      const ImVec2 mouse = ImGui::GetIO().MousePos;
+      const float dx = mouse.x - anchor.x;
+      const float dy = mouse.y - anchor.y;
+      const bool nearAnchor = dx * dx + dy * dy <= 26.0f * 26.0f;
+
+      // The handle is intentionally visible even when the text itself is
+      // obscured by a shader or post effect; it is an editor affordance, not
+      // part of the captured frame.
+      dl->AddCircleFilled(anchor, 6.0f,
+                          textNodeDragging_ ? kHot : kViolet);
+      dl->AddCircle(anchor, 14.0f, textNodeDragging_ ? kHot : kViolet,
+                    24, 1.5f);
+      dl->AddLine(ImVec2(anchor.x - 20, anchor.y),
+                  ImVec2(anchor.x + 20, anchor.y),
+                  c32(177, 140, 255, 110), 1.0f);
+      dl->AddLine(ImVec2(anchor.x, anchor.y - 20),
+                  ImVec2(anchor.x, anchor.y + 20),
+                  c32(177, 140, 255, 110), 1.0f);
+      if (viewportHovered_ && nearAnchor && !textNodeDragging_)
+        dl->AddText(ImVec2(anchor.x + 18, anchor.y - 9), kViolet,
+                    "drag text");
+
+      if (textNodeDragging_ && textDragNodeKey_ != dragKey) {
+        // Scene activation/reload invalidated the gesture between frames.
+        // Do not apply a position to a node from the previous scene.
+        doc_.cancelEdit();
+        textNodeDragging_ = false;
+        textDragNodeKey_.clear();
+        textDragMoved_ = false;
+      }
+
+      if (!textNodeDragging_ && viewportHovered_ && nearAnchor &&
+          ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        textNodeDragging_ = true;
+        textDragNodeKey_ = dragKey;
+        textDragMoved_ = false;
+        doc_.beginEdit("move text node");
+        viewportFocused_ = true;
+      }
+
+      if (textNodeDragging_) {
+        const ImGuiIO& io = ImGui::GetIO();
+        if (io.MouseDown[ImGuiMouseButton_Left]) {
+          const float mx = clampf((mouse.x - p0.x) / std::max(img.x, 1.0f), 0.0f, 1.0f);
+          const float my = clampf((mouse.y - p0.y) / std::max(img.y, 1.0f), 0.0f, 1.0f);
+          // TextMesh consumes centerX as an NDC offset and centerY as an NDC
+          // height coordinate. Scene text stores the former in pos.x*0.5,
+          // hence the factor of two below.
+          const V3 next{(2.0f * (2.0f * mx - 1.0f)),
+                        (1.0f - 2.0f * my), textNode->pos[2]};
+          if (std::fabs(next[0] - textNode->pos[0]) > 0.0001f ||
+              std::fabs(next[1] - textNode->pos[1]) > 0.0001f) {
+            textNode->setPos(next);
+            textDragMoved_ = true;
+            patchDocumentTextPosition(doc_, w_.app ? w_.app->activeScene() : "",
+                                       textNode->name, next);
+          }
+        } else {
+          const std::string nodeName = textNode->name;
+          if (textDragMoved_) {
+            doc_.endEdit();
+            // Commit once at the end of the gesture. Reloading every mouse
+            // motion would invalidate the selected node and make dragging
+            // jump or stop.
+            writeDocument();
+            selNode_ = w_.app ? w_.app->editableScene().find(nodeName) : nullptr;
+            textEditNodeKey_.clear();
+          } else {
+            doc_.cancelEdit();
+          }
+          textNodeDragging_ = false;
+          textDragNodeKey_.clear();
+          textDragMoved_ = false;
+        }
+      }
     }
 
     // HUD overlay (top-left: perf, top-right: show state, bottom-left: time)
@@ -2259,6 +2506,120 @@ void DemoEditor::drawHierarchy() {
   ImGui::End();
 }
 
+namespace {
+
+Cmd* sceneCameraCommand(SceneDef* scene) {
+  if (!scene) return nullptr;
+  for (auto& cmd : scene->setup)
+    if (cmd.name == "camera") return &cmd;
+  return nullptr;
+}
+
+V3 sceneCmdVec3(const Cmd& cmd, const char* key, const V3& fallback) {
+  float f[3];
+  if (cmd.opts.get(key).toFloats(f, 3) == 3) return {f[0], f[1], f[2]};
+  return fallback;
+}
+
+void setSceneCmdVec3(Cmd& cmd, const char* key, const V3& value) {
+  Value::Array a;
+  a.push_back(Value((double)value[0]));
+  a.push_back(Value((double)value[1]));
+  a.push_back(Value((double)value[2]));
+  cmd.opts.set(key) = Value(std::move(a));
+}
+
+bool isFadeCommand(const Cmd& cmd, const char* direction) {
+  return cmd.name == "fade" && cmd.args.size() >= 1 &&
+         cmd.args[0].asStr() == direction;
+}
+
+bool isSceneFadeOutCommand(const Cmd& cmd) {
+  // Both forms are used by existing productions: `fade out 1` is explicit,
+  // while `transition fade 1` is the older scene-relative shorthand.
+  return isFadeCommand(cmd, "out") ||
+         (cmd.name == "transition" && cmd.args.size() >= 1 &&
+          cmd.args[0].asStr() == "fade");
+}
+
+Cmd* findSceneFadeIn(SceneDef* scene) {
+  if (!scene) return nullptr;
+  for (auto& cmd : scene->setup)
+    if (isFadeCommand(cmd, "in")) return &cmd;
+  return nullptr;
+}
+
+struct SceneFadeOutRef {
+  ScriptBlock* block = nullptr;
+  Cmd* command = nullptr;
+};
+
+SceneFadeOutRef findSceneFadeOut(SceneDef* scene) {
+  if (!scene) return {};
+  for (auto& block : scene->blocks)
+    for (auto& cmd : block.cmds)
+      if (isSceneFadeOutCommand(cmd)) return {&block, &cmd};
+  return {};
+}
+
+float sceneDurationForEditor(const SceneDef& scene, const Timeline* timeline,
+                            const DemoApp* app) {
+  if (scene.duration > 0.0f) return scene.duration;
+  if (app) {
+    for (const auto& section : app->sections())
+      if (section.name == scene.name) return section.duration;
+  }
+  if (timeline && scene.bars > 0) return scene.bars * timeline->barSec();
+  return 0.0f;
+}
+
+void setSceneTransition(SceneDef& scene, bool entering, bool enabled,
+                        float duration, float sceneDuration) {
+  duration = std::max(0.0f, duration);
+  if (entering) {
+    auto& setup = scene.setup;
+    for (auto it = setup.begin(); it != setup.end();) {
+      if (isFadeCommand(*it, "in")) it = setup.erase(it);
+      else ++it;
+    }
+    if (enabled && duration > 0.0f) {
+      Cmd fade;
+      fade.name = "fade";
+      fade.args.push_back(Value("in"));
+      fade.args.push_back(Value((double)duration));
+      setup.insert(setup.begin(), std::move(fade));
+    }
+    return;
+  }
+
+  // Scene-relative fade-out commands are placed at the end of the scene.
+  // Remove the old editor-owned form first, then add one at the new cue time.
+  for (auto bit = scene.blocks.begin(); bit != scene.blocks.end();) {
+    auto& cmds = bit->cmds;
+    cmds.erase(std::remove_if(cmds.begin(), cmds.end(),
+                              [](const Cmd& c) { return isSceneFadeOutCommand(c); }),
+               cmds.end());
+    if (cmds.empty()) bit = scene.blocks.erase(bit);
+    else ++bit;
+  }
+  if (!enabled || duration <= 0.0f) return;
+
+  ScriptBlock block;
+  block.time = std::max(0.0f, sceneDuration - duration);
+  Cmd fade;
+  fade.name = "fade";
+  fade.args.push_back(Value("out"));
+  fade.args.push_back(Value((double)duration));
+  block.cmds.push_back(std::move(fade));
+  scene.blocks.push_back(std::move(block));
+  std::stable_sort(scene.blocks.begin(), scene.blocks.end(),
+                   [](const ScriptBlock& a, const ScriptBlock& b) {
+                     return a.time < b.time;
+                   });
+}
+
+}  // namespace
+
 void DemoEditor::loadSceneEditorBuffers() {
   const SceneDef* scene = doc_.findScene(selScene_);
   if (!scene) return;
@@ -2373,6 +2734,136 @@ void DemoEditor::inspectScene() {
   }
   if (ImGui::IsItemDeactivatedAfterEdit()) commitField();
 
+  ImGui::SeparatorText("Camera Rig");
+  Cmd* cameraCmd = sceneCameraCommand(scene);
+  if (!cameraCmd) {
+    ImGui::TextDisabled("This scene has no camera rig command.");
+    if (ImGui::Button("Add camera rig")) {
+      doc_.beginEdit("add camera rig");
+      Cmd camera;
+      camera.name = "camera";
+      camera.args.push_back(Value(scene->name + "Cam"));
+      camera.opts.set("rig") = Value("static");
+      camera.opts.set("pos") = Value(Value::Array{Value(0.0), Value(0.0), Value(4.0)});
+      camera.opts.set("target") = Value(Value::Array{Value(0.0), Value(0.0), Value(0.0)});
+      camera.opts.set("fov") = Value(55.0);
+      scene->setup.insert(scene->setup.begin(), std::move(camera));
+      doc_.endEdit();
+      writeDocument();
+    }
+  } else {
+    const char* rigTypes[] = {"static", "drift", "fly", "nave", "orbit",
+                              "spiral", "hover", "city", "descend", "path"};
+    int rigIndex = 0;
+    for (int i = 0; i < (int)(sizeof(rigTypes) / sizeof(rigTypes[0])); ++i)
+      if (cameraCmd->opts.get("rig").asStr("static") == rigTypes[i]) rigIndex = i;
+    if (ImGui::Combo("Type", &rigIndex, rigTypes,
+                     (int)(sizeof(rigTypes) / sizeof(rigTypes[0])))) {
+      doc_.beginEdit("edit camera rig type");
+      cameraCmd->opts.set("rig") = Value(rigTypes[rigIndex]);
+      doc_.endEdit();
+      writeDocument();
+      cameraCmd = sceneCameraCommand(scene);
+    }
+
+    auto editCameraVec = [this, &cameraCmd](const char* op, const char* label,
+                                             const char* key, V3 fallback) {
+      if (!cameraCmd) return;
+      V3 value = sceneCmdVec3(*cameraCmd, key, fallback);
+      const bool changed = ImGui::DragFloat3(label, value.data(), 0.05f);
+      if (changed) {
+        doc_.beginEdit(op);
+        setSceneCmdVec3(*cameraCmd, key, value);
+      }
+      if (ImGui::IsItemDeactivatedAfterEdit()) {
+        doc_.endEdit();
+        writeDocument();
+      }
+    };
+    auto editCameraFloat = [this, &cameraCmd](const char* op, const char* label,
+                                               const char* key, float fallback,
+                                               float speed, float minValue,
+                                               float maxValue) {
+      if (!cameraCmd) return;
+      float value = cameraCmd->opts.get(key).asFloat(fallback);
+      const bool changed = ImGui::DragFloat(label, &value, speed, minValue, maxValue);
+      if (changed) {
+        doc_.beginEdit(op);
+        cameraCmd->opts.set(key) = Value((double)value);
+      }
+      if (ImGui::IsItemDeactivatedAfterEdit()) {
+        doc_.endEdit();
+        writeDocument();
+      }
+    };
+
+    editCameraVec("edit camera position", "Position", "pos", V3{0, 0, 4});
+    editCameraVec("edit camera target", "Target", "target", V3{0, 0, 0});
+    editCameraVec("edit camera sway", "Sway", "sway", V3{1, 1, 1});
+    editCameraFloat("edit camera fov", "FOV", "fov", 62.0f, 0.5f, 10.0f, 160.0f);
+
+    if (ImGui::TreeNode("Rig motion and lens")) {
+      editCameraFloat("edit camera amplitude", "Amplitude", "amp", 1.0f, 0.05f, 0.0f, 100.0f);
+      editCameraFloat("edit camera frequency", "Frequency", "freq", 1.0f, 0.01f, 0.0f, 100.0f);
+      editCameraFloat("edit camera speed", "Speed", "speed", 1.0f, 0.05f, 0.0f, 500.0f);
+      editCameraFloat("edit camera radius", "Orbit radius", "radius", 4.5f, 0.05f, 0.0f, 1000.0f);
+      editCameraFloat("edit camera omega", "Orbit omega", "omega", 1.0f, 0.01f, -100.0f, 100.0f);
+      editCameraFloat("edit camera handheld", "Handheld", "handheld", 0.0f, 0.01f, 0.0f, 10.0f);
+      editCameraFloat("edit camera focus", "DOF focus", "dofFocus", 8.0f, 0.05f, 0.0f, 10000.0f);
+      editCameraFloat("edit camera aperture", "DOF aperture", "dofAperture", 0.0f, 0.001f, 0.0f, 10.0f);
+      editCameraFloat("edit camera descend rate", "Descend rate", "descendRate", 0.45f, 0.01f, 0.0f, 100.0f);
+      editCameraFloat("edit camera descend cap", "Descend cap", "descendCap", 7.0f, 0.05f, 0.0f, 10000.0f);
+      ImGui::TreePop();
+    }
+  }
+
+  ImGui::SeparatorText("Scene transitions");
+  const float sceneLength = sceneDurationForEditor(*scene, w_.timeline, w_.app);
+  const char* transitionTypes[] = {"None", "Fade"};
+  auto editTransition = [this, &scene, &sceneLength, &transitionTypes](const char* id,
+                                                       const char* label,
+                                                       bool entering) {
+    bool enabled = entering ? findSceneFadeIn(scene) != nullptr
+                            : findSceneFadeOut(scene).command != nullptr;
+    float duration = 1.0f;
+    if (entering) {
+      if (Cmd* fade = findSceneFadeIn(scene))
+        duration = fade->args.size() > 1 ? fade->args[1].asFloat(1.0f) : 1.0f;
+    } else if (SceneFadeOutRef fade = findSceneFadeOut(scene); fade.command) {
+      duration = fade.command->args.size() > 1
+                     ? fade.command->args[1].asFloat(1.0f)
+                     : 1.0f;
+    }
+    int type = enabled ? 1 : 0;
+    ImGui::PushID(id);
+    if (ImGui::Combo(label, &type, transitionTypes, 2)) {
+      doc_.beginEdit(entering ? "edit scene transition in" : "edit scene transition out");
+      setSceneTransition(*scene, entering, type != 0, duration,
+                         sceneLength > 0.0f ? sceneLength : 60.0f);
+      doc_.endEdit();
+      writeDocument();
+    }
+    ImGui::BeginDisabled(type == 0);
+    const float maxDuration = sceneLength > 0.0f ? sceneLength : 60.0f;
+    const bool changed = ImGui::DragFloat("Duration", &duration, 0.05f, 0.0f,
+                                          maxDuration);
+    ImGui::EndDisabled();
+    if (changed) {
+      doc_.beginEdit(entering ? "edit scene transition in duration"
+                              : "edit scene transition out duration");
+      setSceneTransition(*scene, entering, true, duration,
+                         sceneLength > 0.0f ? sceneLength : 60.0f);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+      doc_.endEdit();
+      writeDocument();
+    }
+    ImGui::PopID();
+  };
+  editTransition("transition_in", "In", true);
+  editTransition("transition_out", "Out", false);
+  ImGui::TextDisabled("Fade commands are written into the scene setup and scene-relative timeline.");
+
   ImGui::SeparatorText("Setup commands");
   ImGui::TextDisabled("One command per line. These run when the scene activates.");
   ImGui::TextDisabled("Use the timeline for scene-relative 'at' blocks.");
@@ -2394,6 +2885,117 @@ void DemoEditor::inspectScene() {
 // ---------------------------------------------------------------------------
 // inspector
 // ---------------------------------------------------------------------------
+namespace {
+
+bool patchTextCommandList(std::vector<Cmd>& cmds, const std::string& nodeName,
+                          const std::string& text) {
+  for (auto& cmd : cmds) {
+    if (cmd.name != "text") continue;
+    const std::string candidate = cmd.args.empty() ? "text" : cmd.args[0].asStr();
+    if (candidate != nodeName) continue;        // Keep the node identity stable and put the edited value in the explicit
+        // option used by the runtime (`text name { text ... }`). This also makes
+        // the edit serializable even when the original command used the compact
+        // positional form.
+
+    cmd.opts.set("text") = Value(text);
+    return true;
+  }
+  return false;
+}
+
+bool patchDocumentText(EditorDocument& doc, const std::string& sceneName,
+                       const std::string& nodeName, const std::string& text) {
+  if (SceneDef* scene = doc.findScene(sceneName)) {
+    if (patchTextCommandList(scene->setup, nodeName, text)) return true;
+    for (auto& block : scene->blocks)
+      if (patchTextCommandList(block.cmds, nodeName, text)) return true;
+  }
+  // Text nodes can also be authored in top-level `at` blocks. The fallback is
+  // useful for older productions that did not wrap their scene setup in a
+  // scene declaration.
+  for (auto& block : doc.ast.main)
+    if (patchTextCommandList(block.cmds, nodeName, text)) return true;
+  return false;
+}
+
+bool patchTextSizeCommandList(std::vector<Cmd>& cmds, const std::string& nodeName,
+                              int sizePx) {
+  for (auto& cmd : cmds) {
+    if (cmd.name != "text") continue;
+    const std::string candidate = cmd.args.empty() ? "text" : cmd.args[0].asStr();
+    if (candidate != nodeName) continue;
+    cmd.opts.set("size") = Value(sizePx);
+    return true;
+  }
+  return false;
+}
+
+bool patchDocumentTextSize(EditorDocument& doc, const std::string& sceneName,
+                           const std::string& nodeName, int sizePx) {
+  if (SceneDef* scene = doc.findScene(sceneName)) {
+    if (patchTextSizeCommandList(scene->setup, nodeName, sizePx)) return true;
+    for (auto& block : scene->blocks)
+      if (patchTextSizeCommandList(block.cmds, nodeName, sizePx)) return true;
+  }
+  for (auto& block : doc.ast.main)
+    if (patchTextSizeCommandList(block.cmds, nodeName, sizePx)) return true;
+  return false;
+}
+
+bool patchTextFontCommandList(std::vector<Cmd>& cmds, const std::string& nodeName,
+                              const std::string& font) {
+  for (auto& cmd : cmds) {
+    if (cmd.name != "text") continue;
+    const std::string candidate = cmd.args.empty() ? "text" : cmd.args[0].asStr();
+    if (candidate != nodeName) continue;
+    cmd.opts.set("font") = Value(font);
+    return true;
+  }
+  return false;
+}
+
+bool patchDocumentTextFont(EditorDocument& doc, const std::string& sceneName,
+                           const std::string& nodeName, const std::string& font) {
+  if (SceneDef* scene = doc.findScene(sceneName)) {
+    if (patchTextFontCommandList(scene->setup, nodeName, font)) return true;
+    for (auto& block : scene->blocks)
+      if (patchTextFontCommandList(block.cmds, nodeName, font)) return true;
+  }
+  for (auto& block : doc.ast.main)
+    if (patchTextFontCommandList(block.cmds, nodeName, font)) return true;
+  return false;
+}
+
+bool patchTextPositionCommandList(std::vector<Cmd>& cmds, const std::string& nodeName,
+                                  const V3& pos) {
+  for (auto& cmd : cmds) {
+    if (cmd.name != "text") continue;
+    const std::string candidate = cmd.args.empty() ? "text" : cmd.args[0].asStr();
+    if (candidate != nodeName) continue;
+    Value::Array a;
+    a.push_back(Value((double)pos[0]));
+    a.push_back(Value((double)pos[1]));
+    a.push_back(Value((double)pos[2]));
+    cmd.opts.set("pos") = Value(std::move(a));
+    return true;
+  }
+  return false;
+}
+
+bool patchDocumentTextPosition(EditorDocument& doc, const std::string& sceneName,
+                               const std::string& nodeName, const V3& pos) {
+  if (SceneDef* scene = doc.findScene(sceneName)) {
+    if (patchTextPositionCommandList(scene->setup, nodeName, pos)) return true;
+    for (auto& block : scene->blocks)
+      if (patchTextPositionCommandList(block.cmds, nodeName, pos)) return true;
+  }
+  for (auto& block : doc.ast.main)
+    if (patchTextPositionCommandList(block.cmds, nodeName, pos)) return true;
+  return false;
+}
+
+}  // namespace
+
 void DemoEditor::inspectNode(SceneNode* n) {
   char buf[256];
   std::snprintf(buf, sizeof buf, "%s", n->name.c_str());
@@ -2448,8 +3050,26 @@ void DemoEditor::inspectNode(SceneNode* n) {
         ImGui::DragFloat("Near", &d->nearP, 0.005f, 0.001f, 10.0f);
         ImGui::DragFloat("Far", &d->farP, 5.0f, 1.0f, 5000.0f);
         ImGui::DragFloat3("Target", d->target.data(), 0.05f);
-        std::snprintf(buf, sizeof buf, "%s", d->rig.c_str());
-        if (ImGui::InputText("rig", buf, sizeof buf)) d->rig = buf;
+
+        int rigIndex = 0;
+        for (int i = 0; i < kCameraRigTypeCount; ++i) {
+          if (d->rig == kCameraRigTypes[i]) {
+            rigIndex = i;
+            break;
+          }
+        }
+        if (ImGui::Combo("Camera type", &rigIndex, kCameraRigTypes,
+                         kCameraRigTypeCount)) {
+          d->rig = kCameraRigTypes[rigIndex];
+        }
+        if (d->rig.empty())
+          ImGui::TextDisabled("No rig selected; choose a camera type above.");
+        else if (std::find(std::begin(kCameraRigTypes),
+                           std::end(kCameraRigTypes), d->rig) ==
+                 std::end(kCameraRigTypes))
+          ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(kAmber),
+                             "Unknown rig '%s' (select a supported type)",
+                             d->rig.c_str());
       }
       break;
     case NodeType::Light:
@@ -2508,9 +3128,120 @@ void DemoEditor::inspectNode(SceneNode* n) {
     case NodeType::Text:
       if (auto* d = n->asText()) {
         ImGui::SeparatorText("Text");
-        std::snprintf(buf, sizeof buf, "%s", d->text.c_str());
-        if (ImGui::InputText("text", buf, sizeof buf)) d->text = buf;
-        ImGui::DragInt("size px", &d->sizePx, 1, 6, 200);
+        ImGui::TextDisabled("Drag the purple handle in Viewport to position this text");
+        // InputText owns an internal editing buffer while focused. A local
+        // stack buffer was repopulated from d->text on every frame, which
+        // could make fast edits appear to revert or lose characters. Keep a
+        // stable, generously sized buffer and synchronize it only when the
+        // selected runtime node changes.
+        const std::string textKey =
+            (w_.app ? w_.app->activeScene() : std::string()) + "\x1f" + n->name;
+        if (textEditNodeKey_ != textKey) {
+          textEditNodeKey_ = textKey;
+          std::fill(textEditBuf_.begin(), textEditBuf_.end(), '\0');
+          std::snprintf(textEditBuf_.data(), textEditBuf_.size(), "%s", d->text.c_str());
+        }
+        const bool textChanged =
+            ImGui::InputText("text", textEditBuf_.data(), textEditBuf_.size());
+        if (textChanged) {
+          d->text.assign(textEditBuf_.data());
+          n->dirty = true;
+          // Keep the document model in sync while the preview is edited. The
+          // runtime node remains live for immediate feedback; the serialized
+          // reload is deferred until the field is committed below.
+          doc_.beginEdit("edit text");
+          patchDocumentText(doc_, w_.app ? w_.app->activeScene() : "",
+                            n->name, d->text);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+          const std::string nodeName = n->name;
+          doc_.endEdit();
+          if (doc_.dirty && writeDocument()) {
+            // writeDocument() rebuilds the scene graph, so never retain the
+            // old pointer. Re-select the freshly created runtime node and
+            // force the editor buffer to be re-seeded next frame.
+            selNode_ = w_.app ? w_.app->editableScene().find(nodeName) : nullptr;
+            textEditNodeKey_.clear();
+            // The reload replaced d, so leave this inspector invocation before
+            // any further payload controls dereference the old pointer.
+            return;
+          }
+        }
+        // A text node can use any TrueType/OTF file under assets/fonts. The
+        // runtime caches named atlases, so changing one node does not replace
+        // the project's default font or invalidate another scene's text.
+        const std::string fontKey =
+            (w_.app ? w_.app->activeScene() : std::string()) + "\x1f" + n->name + "\x1f_font";
+        if (textFontEditNodeKey_ != fontKey) {
+          textFontEditNodeKey_ = fontKey;
+          std::fill(textFontEditBuf_.begin(), textFontEditBuf_.end(), '\0');
+          std::snprintf(textFontEditBuf_.data(), textFontEditBuf_.size(), "%s", d->font.c_str());
+        }
+        if (ImGui::InputText("font file", textFontEditBuf_.data(), textFontEditBuf_.size())) {
+          d->font.assign(textFontEditBuf_.data());
+          n->dirty = true;
+          doc_.beginEdit("edit text font");
+          patchDocumentTextFont(doc_, w_.app ? w_.app->activeScene() : "",
+                                n->name, d->font);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+          const std::string nodeName = n->name;
+          doc_.endEdit();
+          if (doc_.dirty && writeDocument()) {
+            selNode_ = w_.app ? w_.app->editableScene().find(nodeName) : nullptr;
+            textEditNodeKey_.clear();
+            textFontEditNodeKey_.clear();
+            return;
+          }
+        }
+        ImGui::TextDisabled("blank = default font; use assets/fonts/name.ttf or .otf");
+
+        // Keep a long caption inside the viewport while it is being edited.
+        // TextMesh intentionally uses pixel-sized cells; without this guard a
+        // long line can grow wider than the render target and look as if it
+        // disappeared when its size is increased.
+        const float cellAspect = w_.assets
+                                     ? (float)w_.assets->fontMetrics.cellW /
+                                           std::max(1, w_.assets->fontMetrics.cellH)
+                                     : 1.0f;
+        const int charCount = std::max(1, (int)d->text.size());
+        const int viewportMax = w_.r && w_.r->viewW > 0
+                                    ? (int)((float)w_.r->viewW * 0.88f /
+                                            (charCount * std::max(0.01f, cellAspect)))
+                                    : 200;
+        const int maxTextSize = std::max(6, std::min(200, viewportMax));
+        if (d->sizePx > maxTextSize) {
+          const std::string nodeName = n->name;
+          d->sizePx = maxTextSize;
+          n->dirty = true;
+          doc_.beginEdit("fit text size");
+          if (patchDocumentTextSize(doc_, w_.app ? w_.app->activeScene() : "",
+                                    nodeName, d->sizePx)) {
+            doc_.endEdit();
+            if (doc_.dirty && writeDocument()) {
+              selNode_ = w_.app ? w_.app->editableScene().find(nodeName) : nullptr;
+              textEditNodeKey_.clear();
+              return;
+            }
+          } else {
+            doc_.cancelEdit();
+          }
+        }
+        if (ImGui::DragInt("size px", &d->sizePx, 1, 6, maxTextSize)) {
+          n->dirty = true;
+          doc_.beginEdit("edit text size");
+          patchDocumentTextSize(doc_, w_.app ? w_.app->activeScene() : "",
+                                n->name, d->sizePx);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+          const std::string nodeName = n->name;
+          doc_.endEdit();
+          if (doc_.dirty && writeDocument()) {
+            selNode_ = w_.app ? w_.app->editableScene().find(nodeName) : nullptr;
+            textEditNodeKey_.clear();
+            return;
+          }
+        }
         const char* styles[] = {"terminal", "holo", "glitch", "neon", "scan",
                                 "dissolve", "chrome", "outline"};
         int si = 0;
@@ -3351,8 +4082,27 @@ void DemoEditor::drawProfiler() {
 // ---------------------------------------------------------------------------
 // viewport input forwarding: fly camera
 // ---------------------------------------------------------------------------
+void DemoEditor::glfwFlyCursorPosCallback(GLFWwindow* window, double x, double y) {
+  DemoEditor* editor = g_flyCursorTarget;
+  if (editor && editor->w_.window == window && editor->flyActive_ &&
+      editor->flyMousePrimed_) {
+    editor->flyMouseDx_ += x - editor->flyMouseLastX_;
+    editor->flyMouseDy_ += y - editor->flyMouseLastY_;
+    editor->flyMouseLastX_ = x;
+    editor->flyMouseLastY_ = y;
+  }
+  // Keep Dear ImGui's installed callback alive; it still needs the events when
+  // fly mode exits and the editor resumes normal mouse interaction.
+  if (editor && editor->previousCursorPos_ &&
+      editor->previousCursorPos_ != &DemoEditor::glfwFlyCursorPosCallback) {
+    editor->previousCursorPos_(window, x, y);
+  }
+}
+
 void DemoEditor::enterFly() {
   flyActive_ = true;
+  flyMouseDx_ = flyMouseDy_ = 0.0;
+  flyMousePrimed_ = false;
   Camera* cam = w_.camera;
   if (cam) {
     flyPos_ = cam->pos;
@@ -3367,11 +4117,13 @@ void DemoEditor::enterFly() {
     cam->crashKick = 0;
     cam->handheld = 0;
   }
-  flyLastX_ = flyLastY_ = 0;
   flySpacePrev_ = glfwGetKey(w_.window, GLFW_KEY_SPACE) == GLFW_PRESS;
-  // capture the mouse (GLFW disabled mode gives unbounded virtual coords -
-  // perfect for mouse-look) and blind ImGui to the mouse while flying
+  // capture the mouse (GLFW disabled mode gives relative cursor callbacks -
+  // reliable even when glfwGetCursorPos() remains fixed at the lock point)
+  // and blind ImGui to the mouse while flying.
   glfwSetInputMode(w_.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+  glfwGetCursorPos(w_.window, &flyMouseLastX_, &flyMouseLastY_);
+  flyMousePrimed_ = true;
   ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
   Log::info("EDITOR", "fly camera: WASD move, Shift fast, Q/E up/down, RMB to release");
 }
@@ -3379,6 +4131,8 @@ void DemoEditor::enterFly() {
 void DemoEditor::exitFly() {
   if (!flyActive_) return;
   flyActive_ = false;
+  flyMouseDx_ = flyMouseDy_ = 0.0;
+  flyMousePrimed_ = false;
   glfwSetInputMode(w_.window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
   ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
 }
@@ -3420,18 +4174,21 @@ void DemoEditor::pollViewportInput(float dt) {
     return;
   }
 
-  // mouse look: with GLFW_CURSOR_DISABLED the cursor is locked and
-  // glfwGetCursorPos reports unbounded virtual motion - deltas never clamp
-  // at the window edge and no re-centering is needed
-  double x = 0, y = 0;
-  glfwGetCursorPos(win, &x, &y);
-  if (flyLastX_ != 0 || flyLastY_ != 0) {
+  // mouse look: consume relative motion from the GLFW cursor callback. This
+  // avoids depending on absolute cursor coordinates, which can stop changing
+  // while GLFW_CURSOR_DISABLED is active on some systems.
+  const double mouseDx = flyMouseDx_;
+  const double mouseDy = flyMouseDy_;
+  flyMouseDx_ = flyMouseDy_ = 0.0;
+  if (flyMousePrimed_) {
     constexpr float kSens = 0.0022f;
-    flyYaw_ += (float)(x - flyLastX_) * kSens;
-    flyPitch_ = clampf(flyPitch_ - (float)(y - flyLastY_) * kSens, -1.55f, 1.55f);
+    // Keep the view's movement aligned with the viewport drag: right/left and
+    // up/down gestures now follow the cursor instead of feeling inverted.
+    // (The yaw/pitch signs are opposite to the raw cursor axes because the
+    // camera looks through the viewport rather than dragging the scene plane.)
+    flyYaw_ -= (float)mouseDx * kSens;
+    flyPitch_ = clampf(flyPitch_ + (float)mouseDy * kSens, -1.55f, 1.55f);
   }
-  flyLastX_ = x;
-  flyLastY_ = y;
 
   // movement (raw GLFW state - ImGui never sees these while flying)
   const bool wKey = glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS;
@@ -3460,7 +4217,7 @@ void DemoEditor::pollViewportInput(float dt) {
 
   // keep Space as a pause toggle while flying (edge-triggered on raw state)
   const bool sp = glfwGetKey(win, GLFW_KEY_SPACE) == GLFW_PRESS;
-  if (sp && !flySpacePrev_ && w_.director) w_.director->togglePause();
+  if (sp && !flySpacePrev_ && w_.director) togglePlayback();
   flySpacePrev_ = sp;
 }
 
@@ -3698,6 +4455,11 @@ void DemoEditor::drawAudioPopup() {
     ImGui::TextDisabled("duration");
     ImGui::SameLine();
     ImGui::Text("%.1f s", a->trackDuration);
+    if (detectedBpm_ > 0.0f) {
+      ImGui::TextDisabled("project BPM");
+      ImGui::SameLine();
+      ImGui::Text("%.1f", detectedBpm_);
+    }
   }
   // background decode status: a spinner while the worker runs, so loading a
   // large track doesn't freeze the editor (the swap commits when ready)
@@ -4166,6 +4928,80 @@ void DemoEditor::applyTexturePick(const std::string& path, SceneNode* target) {
   }
 }
 
+void DemoEditor::addShaderToScene(const std::string& path) {
+  if (!w_.app || path.empty()) return;
+  const std::filesystem::path source = std::filesystem::absolute(path).lexically_normal();
+  if (!std::filesystem::is_regular_file(source)) {
+    showToast("shader: file not found - " + source.filename().string(), 0);
+    return;
+  }
+
+  // Keep scene references portable. A shader outside the project's canonical
+  // shaders/ directory is copied into it before the command is serialized;
+  // the existing live preview still uses the original path if this fails.
+  const std::filesystem::path shaderRoot =
+      std::filesystem::absolute(w_.shaderDir).lexically_normal();
+  std::filesystem::path target = shaderRoot / source.filename();
+  std::error_code ec;
+  if (source.parent_path() != shaderRoot) {
+    std::filesystem::create_directories(shaderRoot, ec);
+    if (ec) {
+      showToast("shader: cannot create project shader directory", 0);
+      return;
+    }
+    if (std::filesystem::exists(target)) {
+      const std::string stem = source.stem().string();
+      const std::string ext = source.extension().string();
+      for (int suffix = 2; std::filesystem::exists(target); suffix++) {
+        target = shaderRoot / (stem + "_scene" + std::to_string(suffix) + ext);
+      }
+    }
+    std::filesystem::copy_file(source, target,
+                               std::filesystem::copy_options::none, ec);
+    if (ec) {
+      showToast("shader: copy failed - " + source.filename().string(), 0);
+      Log::error("EDITOR", "shader copy failed: " + ec.message());
+      return;
+    }
+  }
+
+  const std::string sceneName =
+      !selScene_.empty() ? selScene_ : w_.app->activeScene();
+  SceneDef* scene = sceneName.empty() ? nullptr : doc_.findScene(sceneName);
+  if (!scene) {
+    showToast("shader: select a scene first", 1);
+    return;
+  }
+  const std::string shaderRef = target.filename().string();
+  bool alreadyPresent = false;
+  for (const auto& cmd : scene->setup) {
+    if (cmd.name == "shader" && !cmd.args.empty() &&
+        cmd.args[0].asStr() == shaderRef) {
+      alreadyPresent = true;
+      break;
+    }
+  }
+
+  if (!alreadyPresent) {
+    Cmd cmd;
+    cmd.name = "shader";
+    cmd.args.push_back(Value(shaderRef));
+    doc_.beginEdit("add shader to scene");
+    scene->setup.push_back(std::move(cmd));
+    doc_.endEdit();
+    if (!doc_.dirty || !writeDocument()) {
+      showToast("shader: could not save scene", 0);
+      return;
+    }
+  }
+
+  const std::string preview = browseEffectName(target.string(), w_.shaderDir, w_.dataDir);
+  w_.app->editorShowEffect(preview);
+  showToast("shader: live in " + sceneName + " - " + shaderRef, 2);
+  Log::info("EDITOR", "shader '" + shaderRef + "' " +
+                           (alreadyPresent ? "previewed in " : "added to ") + sceneName);
+}
+
 void DemoEditor::pickBrowseFile(int kind, const std::string& path) {
   if (kind == (int)BrowseKind::Audio) { applyAudioTrack(path); return; }
   if (!w_.app) return;
@@ -4173,13 +5009,17 @@ void DemoEditor::pickBrowseFile(int kind, const std::string& path) {
   switch ((BrowseKind)kind) {
     case BrowseKind::Texture: applyTexturePick(path, selNode_); break;
     case BrowseKind::Shader: {
-      const std::string ext = p.extension().string();
+      std::string ext = p.extension().string();
+      for (char& c : ext)
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
       if (ext == ".glsl") {  // shadertoy source
         w_.app->editorShowEffect(browseEffectName(path, w_.shaderDir, w_.dataDir));
+        showToast("shader: live preview - " + p.filename().string(), 2);
       } else if (ext == ".frag") {
         // quad effects resolve frag by name against the shader dir, so the
         // extension must survive ("quad:plasma" would miss plasma.frag)
         w_.app->editorShowEffect(browseEffectName(path, w_.shaderDir, w_.dataDir));
+        showToast("shader: live preview - " + p.filename().string(), 2);
       } else {
         Log::warn("EDITOR", "vertex shaders can't run standalone as a quad yet: " + path);
       }
@@ -4768,6 +5608,10 @@ void DemoEditor::drawScratch() {
       showToast("scratch: can't preview a .vert", 1);
     }
   }
+  if (std::filesystem::path(scratchPath_).extension().string() == ".frag") {
+    ImGui::SameLine();
+    if (ImGui::Button("Add to Scene")) addShaderToScene(scratchPath_);
+  }
   ImGui::EndDisabled();
   ImGui::SameLine();
   if (ImGui::Button("Save (Ctrl+S)") || ctrlS) saveScratch();
@@ -4885,6 +5729,21 @@ void DemoEditor::drawBrowse() {
     ImGui::CloseCurrentPopup();
   }
   ImGui::EndDisabled();
+  if (browseKind_ == (int)BrowseKind::Shader &&
+      std::filesystem::path(cb.sel).extension().string() == ".frag") {
+    ImGui::SameLine();
+    const bool hasScene = w_.app &&
+                          (!selScene_.empty() || !w_.app->activeScene().empty());
+    ImGui::BeginDisabled(!hasScene || cb.sel.empty());
+    if (ImGui::Button("Add to Scene")) {
+      addShaderToScene(cb.sel);
+      browseOpen_ = false;
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Copy the shader into shaders/ and add it to the selected scene");
+  }
   ImGui::SameLine();
   if (ImGui::Button("Cancel")) {
     browseOpen_ = false;
@@ -5106,6 +5965,7 @@ void DemoEditor::rebuildAudioEnvelope() {
   // re-trigger a rebuild every frame on an early return
   audioEnvPath_ = w_.audio->trackPath();
   audioEnvFrames_ = w_.audio->trackFrames();
+  detectedBpm_ = 0.0f;
   if (!w_.audio->trackMode) return;
   const std::vector<float>& data = w_.audio->trackSamples();
   const uint64_t frames = w_.audio->trackFrames();
@@ -5128,6 +5988,7 @@ void DemoEditor::rebuildAudioEnvelope() {
     audioEnv_[(size_t)b] = peak;
   }
   detectKicks();
+  applyDetectedBpm();
 }
 
 void DemoEditor::detectKicks() {
@@ -5189,6 +6050,117 @@ void DemoEditor::detectKicks() {
     const float t = (float)b * hop / (float)sr;
     if (!kickTimes_.empty() && t - kickTimes_.back() < minBeat) continue;
     kickTimes_.push_back(t);
+  }
+}
+
+float DemoEditor::estimateTrackBpm() const {
+  if (!w_.audio || !w_.audio->trackMode) return 0.0f;
+
+  // Prefer the kick transients: unlike a raw waveform autocorrelation, their
+  // spacing maps directly to the musical beat and stays stable when a track
+  // contains a sustained bass note. Require a few reasonably regular hits so
+  // a handful of unrelated impacts cannot change the project tempo.
+  if (kickTimes_.size() >= 3) {
+    std::vector<float> intervals;
+    intervals.reserve(kickTimes_.size() - 1);
+    for (size_t i = 1; i < kickTimes_.size(); ++i) {
+      const float d = kickTimes_[i] - kickTimes_[i - 1];
+      if (d >= 0.20f && d <= 2.0f) intervals.push_back(d);
+    }
+    if (intervals.size() >= 2) {
+      std::sort(intervals.begin(), intervals.end());
+      const float median = intervals[intervals.size() / 2];
+      size_t inliers = 0;
+      float err = 0.0f;
+      for (const float d : intervals) {
+        const float rel = std::fabs(d - median) / median;
+        if (rel < 0.20f) {
+          ++inliers;
+          err += rel;
+        }
+      }
+      if (inliers >= std::max<size_t>(2, intervals.size() / 2)) {
+        float bpm = 60.0f / median;
+        // The detector can miss every other hit, or occasionally report a
+        // subdivision. Fold octave errors into a useful demoscene tempo range
+        // without permitting implausible values into the project header.
+        while (bpm < 60.0f) bpm *= 2.0f;
+        while (bpm > 240.0f) bpm *= 0.5f;
+        if (bpm >= 60.0f && bpm <= 240.0f &&
+            (err / (float)inliers) < 0.20f)
+          return std::round(bpm * 2.0f) * 0.5f;
+      }
+    }
+  }
+
+  // Fallback for tracks without sharp kick transients: correlate the editor's
+  // 60 Hz peak envelope over the conventional 60..240 BPM range. The
+  // normalized score avoids preferring a lag merely because it has more
+  // overlapping samples.
+  if (audioEnv_.size() < 32) return 0.0f;
+  const float mean = std::accumulate(audioEnv_.begin(), audioEnv_.end(), 0.0f) /
+                     (float)audioEnv_.size();
+  float bestScore = 0.0f;
+  float bestBpm = 0.0f;
+  for (float bpm = 60.0f; bpm <= 240.0f; bpm += 0.5f) {
+    const int lag = (int)std::round(60.0f * 60.0f / bpm);
+    if (lag <= 0 || lag >= (int)audioEnv_.size()) continue;
+    double dot = 0.0, aa = 0.0, bb = 0.0;
+    for (size_t i = (size_t)lag; i < audioEnv_.size(); ++i) {
+      const float a = audioEnv_[i] - mean;
+      const float b = audioEnv_[i - (size_t)lag] - mean;
+      dot += (double)a * b;
+      aa += (double)a * a;
+      bb += (double)b * b;
+    }
+    const float score = (aa > 1e-9 && bb > 1e-9)
+                           ? (float)(dot / std::sqrt(aa * bb))
+                           : 0.0f;
+    if (score > bestScore) {
+      bestScore = score;
+      bestBpm = bpm;
+    }
+  }
+  return bestScore >= 0.30f ? bestBpm : 0.0f;
+}
+
+void DemoEditor::applyDetectedBpm() {
+  const float bpm = estimateTrackBpm();
+  if (bpm <= 0.0f) {
+    detectedBpm_ = 0.0f;
+    return;
+  }
+  detectedBpm_ = bpm;
+  const float current = doc_.ast.bpm > 0.0f ? doc_.ast.bpm : 216.0f;
+  if (std::fabs(current - bpm) < 0.5f) {
+    Log::info("AUDIO", "track BPM detected: " + std::to_string(bpm) +
+                           " (project already matches)");
+    return;
+  }
+
+  // The audio smoke creates a deliberately tiny temporary track while it is
+  // running against the real editor process. Report the estimate there but
+  // never rewrite the user's project as a side effect of a diagnostic run.
+  if (smokeAudio_) {
+    Log::info("AUDIO", "track BPM detected: " + std::to_string(bpm) +
+                           " (smoke; project unchanged)");
+    return;
+  }
+
+  doc_.beginEdit("set project BPM from track");
+  doc_.ast.bpm = bpm;
+  doc_.endEdit();
+  if (doc_.path.empty()) {
+    if (w_.timeline) w_.timeline->setBpm(bpm);
+    Log::info("AUDIO", "track BPM detected: " + std::to_string(bpm) +
+                           " (runtime timeline updated; project has no path)");
+    return;
+  }
+  if (writeDocument()) {
+    Log::info("AUDIO", "track BPM detected: " + std::to_string(bpm) +
+                           " - project BPM updated");
+  } else {
+    Log::error("AUDIO", "track BPM detected but project BPM could not be saved");
   }
 }
 
@@ -5268,6 +6240,10 @@ void DemoEditor::pumpAsyncAudioSwap() {
     // the envelope rebuild at the next draw
     beatOffset_ = 0;
     beatDrag_ = false;
+    // Analyse immediately after the decode commits. This keeps BPM detection
+    // independent of panel visibility and applies the project tempo before
+    // the next engine update/render.
+    rebuildAudioEnvelope();
     std::snprintf(sb, sizeof sb, "editor: track -> %s (synced to show time %.1fs)",
                   pending.c_str(), show);
     Log::info("AUDIO", sb);
@@ -5317,6 +6293,124 @@ void DemoEditor::drawNewProjectConfirm() {
     pendingNewProjectPath_.clear();
   }
   ImGui::EndPopup();
+}
+
+void DemoEditor::seedNsdCommandSource() {
+  if (nsdCommandIndex_ < 0 || nsdCommandIndex_ >= kNsdCommandCount) nsdCommandIndex_ = 0;
+  const NsdCommandInfo& info = kNsdCommands[nsdCommandIndex_];
+  if (nsdCommandSeed_ == info.name) return;
+  std::fill(nsdCommandBuf_.begin(), nsdCommandBuf_.end(), '\0');
+  std::snprintf(nsdCommandBuf_.data(), nsdCommandBuf_.size(), "%s", info.source);
+  nsdCommandSeed_ = info.name;
+  nsdCommandDirty_ = false;
+}
+
+bool DemoEditor::insertNsdCommand() {
+  if (!w_.app || doc_.path.empty()) {
+    Log::warn("EDITOR", "NSD command insertion requires a saved .nsd project");
+    return false;
+  }
+  const std::string source = nsdCommandBuf_.data();
+  if (source.empty()) {
+    Log::warn("EDITOR", "NSD command source is empty");
+    return false;
+  }
+
+  Cmd command;
+  std::string error;
+  if (!parseEditorCommand(source, nsdCommandTarget_, command, error)) {
+    Log::error("EDITOR", "NSD command rejected: " + error);
+    return false;
+  }
+  const std::string insertedSource = nsdSerializeCmd(command);
+
+  doc_.beginEdit("insert NSD command");
+  if (nsdCommandTarget_ == 0) {
+    std::string sceneName = selScene_;
+    if (sceneName.empty()) sceneName = w_.app->activeScene();
+    SceneDef* scene = doc_.findScene(sceneName);
+    if (!scene) {
+      doc_.cancelEdit();
+      Log::warn("EDITOR", "select a scene before inserting a setup command");
+      return false;
+    }
+    scene->setup.push_back(std::move(command));
+    selScene_ = sceneName;
+  } else {
+    ScriptBlock block;
+    block.time = std::max(0.0f, w_.director ? w_.director->show : 0.0f);
+    block.cmds.push_back(std::move(command));
+    doc_.ast.main.push_back(std::move(block));
+    std::sort(doc_.ast.main.begin(), doc_.ast.main.end(),
+              [](const ScriptBlock& a, const ScriptBlock& b) { return a.time < b.time; });
+  }
+  doc_.endEdit();
+
+  if (!writeDocument()) {
+    Log::error("EDITOR", "NSD command could not be written to the project");
+    return false;
+  }
+  // Reloading the document rebuilds the scene graph and invalidates the
+  // inspector's selected node pointer.
+  selNode_ = nullptr;
+  selEffect_.clear();
+  textEditNodeKey_.clear();
+  nsdCommandDirty_ = false;
+  Log::info("EDITOR", "inserted NSD command: " + insertedSource);
+  return true;
+}
+
+void DemoEditor::drawNsdCommands() {
+  if (!showNsdCommands_ || fullscreenPreview_) return;
+  seedNsdCommandSource();
+  if (!ImGui::Begin("NSD Commands", &showNsdCommands_)) {
+    ImGui::End();
+    return;
+  }
+
+  ImGui::TextDisabled("Authoring interface for every NSD scripting command");
+  ImGui::TextDisabled("Choose a template, then edit the generated source for advanced options.");
+  ImGui::Separator();
+
+  const char* commandNames[kNsdCommandCount];
+  for (int i = 0; i < kNsdCommandCount; ++i) commandNames[i] = kNsdCommands[i].name;
+  if (ImGui::Combo("Command", &nsdCommandIndex_, commandNames, kNsdCommandCount))
+    seedNsdCommandSource();
+
+  const NsdCommandInfo& info = kNsdCommands[nsdCommandIndex_];
+  ImGui::Text("%s", info.signature);
+  ImGui::TextDisabled("%s", info.description);
+
+  const char* targets[] = {"Selected scene setup", "Timeline at playhead"};
+  ImGui::Combo("Insert into", &nsdCommandTarget_, targets, 2);
+  if (nsdCommandTarget_ == 0) {
+    const std::string sceneName = !selScene_.empty()
+                                      ? selScene_
+                                      : (w_.app ? w_.app->activeScene() : std::string());
+    if (sceneName.empty())
+      ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(kAmber),
+                         "Select a scene in Hierarchy first.");
+    else
+      ImGui::TextDisabled("target scene: %s", sceneName.c_str());
+  } else {
+    ImGui::TextDisabled("target time: %s", fmtTime(w_.director ? w_.director->show : 0.0f).c_str());
+  }
+
+  ImGui::SeparatorText("Command source");
+  if (ImGui::InputTextMultiline("##nsd_command_source", nsdCommandBuf_.data(),
+                                nsdCommandBuf_.size(), ImVec2(-1, 150)))
+    nsdCommandDirty_ = true;
+
+  if (ImGui::Button("Insert into Project")) insertNsdCommand();
+  ImGui::SameLine();
+  if (ImGui::Button("Copy Source")) ImGui::SetClipboardText(nsdCommandBuf_.data());
+  ImGui::SameLine();
+  if (ImGui::Button("Reset Template")) {
+    nsdCommandSeed_.clear();
+    seedNsdCommandSource();
+  }
+  ImGui::TextDisabled("Commands are serialized, saved, and reloaded immediately.");
+  ImGui::End();
 }
 
 void DemoEditor::drawNewAssetDialog() {
@@ -5524,6 +6618,49 @@ std::string DemoEditor::sanitizeAssetName(const char* in) {
       out += c;
   }
   return out;
+}
+
+void DemoEditor::insertShaderLabIntoTimeline() {
+  const std::string snippet = shaderLab_.timelineSnippet();
+  const std::string path = shaderLab_.exportedShaderPath();
+  if (snippet.empty() || path.empty() || !w_.app || doc_.path.empty()) {
+    Log::warn("SHADERLAB", "Insert into Timeline requires a saved project and shader asset");
+    return;
+  }
+  Cmd c;
+  c.name = "shader";
+  c.args.push_back(Value(std::filesystem::path(path).filename().string()));
+  c.opts = Value::object();
+  // The exported GLSL already contains the selected text as baked glyph
+  // geometry. Keep only the atlas binding flag here; adding a `text` option is
+  // redundant and can make the runtime treat the export as a second text
+  // source when it is inserted into a scene that already has text nodes.
+  c.opts.set("useFont") = Value(true);
+  const std::string font = shaderLab_.selectedFontPath();
+  if (!font.empty())
+    c.opts.set("font") = Value("assets/fonts/" +
+                                std::filesystem::path(font).filename().string());
+  const std::string texture = shaderLab_.selectedTexturePath();
+  if (!texture.empty()) {
+    c.opts.set("texture") = Value(texture);
+    c.opts.set("textureMix") = Value((double)shaderLab_.textureMix());
+    c.opts.set("textureScale") = Value((double)shaderLab_.textureScale());
+    c.opts.set("textureScroll") = Value((double)shaderLab_.textureScroll());
+  }
+  ScriptBlock b;
+  b.time = w_.director ? w_.director->show : 0.0f;
+  b.cmds.push_back(std::move(c));
+  doc_.beginEdit("insert shader lab effect");
+  doc_.ast.main.push_back(std::move(b));
+  std::sort(doc_.ast.main.begin(), doc_.ast.main.end(),
+            [](const ScriptBlock& a, const ScriptBlock& b) { return a.time < b.time; });
+  doc_.endEdit();
+  if (writeDocument()) {
+    ImGui::SetClipboardText(snippet.c_str());
+    Log::info("SHADERLAB", "inserted " + std::filesystem::path(path).filename().string() +
+                             " at " + fmtTime(w_.director ? w_.director->show : 0.0f) +
+                             " (snippet copied to clipboard)");
+  }
 }
 
 }  // namespace ns

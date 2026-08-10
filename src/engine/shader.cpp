@@ -134,6 +134,7 @@ int Shader::loc(const char* name) const {
 void Shader::set1f(const char* name, float v) { const int l = loc(name); if (l >= 0) ::glUniform1f(l, v); }
 void Shader::set2f(const char* name, float x, float y) { const int l = loc(name); if (l >= 0) ::glUniform2f(l, x, y); }
 void Shader::set3f(const char* name, float x, float y, float z) { const int l = loc(name); if (l >= 0) ::glUniform3f(l, x, y, z); }
+void Shader::set4f(const char* name, float x, float y, float z, float w) { const int l = loc(name); if (l >= 0) ::glUniform4f(l, x, y, z, w); }
 void Shader::set1i(const char* name, int v) { const int l = loc(name); if (l >= 0) ::glUniform1i(l, v); }
 void Shader::setVec2(const char* name, const float* v) { const int l = loc(name); if (l >= 0) ::glUniform2fv(l, 1, v); }
 void Shader::setVec3(const char* name, const float* v) { const int l = loc(name); if (l >= 0) ::glUniform3fv(l, 1, v); }

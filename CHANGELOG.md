@@ -5,6 +5,14 @@ All notable changes to the Null Sector Demo Engine are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Shader Lab** — a dockable demoscene typography workspace with live OpenGL preview, GLSL source editing, compile diagnostics, multi-font selection, textured and procedural colour fills, text/font/layout controls, audio/timeline uniforms, metadata-driven parameter sliders, twelve text presets, shader asset export, and one-click NSD timeline insertion. Exported shaders remain ordinary `.frag` assets and use the existing runtime `shader`/`SceneFX` path.
+- **Editor text authoring** — selected text nodes now expose a visible screen-space handle in the live Viewport. Dragging the handle updates normalized NSD `pos` coordinates, persists the change to the project, and records the complete gesture as one undoable edit; the selected node is safely re-acquired after the runtime reload.
+- **Editor scene authoring** — the NSD command palette, camera-rig inspector, camera-type selector, and scene transition in/out controls make previously script-only scene properties editable without leaving the editor.
+
 ## [0.2.0] — 2026-08-09
 
 ### Added
@@ -208,7 +216,7 @@ production.
   Core, Tunnel, Lost City, Corruption, Dream, Neural Ocean, System Failure,
   Final Reconstruction, New Reality) with a full 346 s soundtrack and
   data-driven timeline
-- **Ghost In The Machine** — flagship production shipping as `data/demo.nsd`
+- **Null Sector Demo Engine** — flagship production shipping as `data/demo.nsd`
 - Dear ImGui demo editor (timeline, hierarchy, inspector, asset drops)
 - Validation suite: `--check-shaders`, `--check-production`, `--check-models`,
   `--check-shadertoy`, `--check-hotreload`, `--smoke-audio`, plus framework

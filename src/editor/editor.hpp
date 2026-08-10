@@ -30,6 +30,7 @@
 #include "editor/document.hpp"            // EditorDocument (AST + undo)
 #include "editor/exportmp4.hpp"           // Mp4Export (File > Export MP4...)
 #include "editor/packaging.hpp"            // project NSP/ZIP distribution
+#include "editor/shaderlab.hpp"            // typography-focused shader workspace
 
 #include <GLFW/glfw3.h>
 #include <string>
@@ -48,6 +49,7 @@ public:
     Renderer* r = nullptr;
     Camera* camera = nullptr;
     AudioEngine* audio = nullptr;
+    Assets* assets = nullptr;
     Timeline* timeline = nullptr;
     PostFX* postfx = nullptr;
     DirectorTime* director = nullptr;
@@ -94,6 +96,8 @@ private:
   bool showToolbar_ = true;
   bool showHierarchy_ = true, showInspector_ = true, showTimeline_ = true;
   bool showConsole_ = true, showAssets_ = true, showProfiler_ = true;
+  bool showShaderLab_ = false;
+  bool showNsdCommands_ = false;
   bool fullscreenPreview_ = false;
   // panel visibility snapshot taken on entering fullscreen preview
   bool savedToolbar_ = true, savedHierarchy_ = true, savedInspector_ = true,
@@ -108,6 +112,7 @@ private:
 
   // selection
   SceneNode* selNode_ = nullptr;
+  std::string lastActiveScene_;
   std::string selEffect_;
   std::string selAsset_;
   std::string selScene_;       // selected declaration from the loaded .nsd
@@ -116,6 +121,20 @@ private:
   std::vector<char> sceneSetupBuf_;  // editable setup command source
   std::string sceneEditScene_;       // scene represented by the buffers
   bool sceneSetupDirty_ = false;
+  // Persistent text-editor storage. Keeping this outside inspectNode() avoids
+  // re-seeding ImGui's active InputText state from a short-lived stack buffer
+  // every frame, which could drop edits while the field was still focused.
+  std::vector<char> textEditBuf_ = std::vector<char>(4096, '\0');
+  std::string textEditNodeKey_;
+  std::vector<char> textFontEditBuf_ = std::vector<char>(512, '\0');
+  std::string textFontEditNodeKey_;
+
+  // Screen-space text placement in the live viewport. Text nodes are rendered
+  // as 2D overlays, so their position is edited in normalized screen space
+  // and then written back to the text command's `pos` option on mouse release.
+  bool textNodeDragging_ = false;
+  std::string textDragNodeKey_;
+  bool textDragMoved_ = false;
 
   void drawSceneList();
   void inspectScene();
@@ -139,7 +158,13 @@ private:
   float flyYaw_ = 0, flyPitch_ = 0;
   V3 flyPos_{0, 0, 0};
   float flySpeed_ = 8.0f;          // world units / second
-  double flyLastX_ = 0, flyLastY_ = 0;
+  // Cursor-position callback accumulator. Polling glfwGetCursorPos() while
+  // GLFW_CURSOR_DISABLED is unreliable on some Windows/driver combinations;
+  // the callback provides relative motion even when the cursor is locked.
+  double flyMouseDx_ = 0, flyMouseDy_ = 0;
+  double flyMouseLastX_ = 0, flyMouseLastY_ = 0;
+  bool flyMousePrimed_ = false;
+  GLFWcursorposfun previousCursorPos_ = nullptr;
   bool flySpacePrev_ = false;      // edge-triggered pause while flying
 
   // programmatic fly smoke (NS_EDITOR_FLY_SMOKE=1 + --editor-seconds=N):
@@ -243,6 +268,7 @@ private:
   bool vpRectValid_ = false;      // last frame's viewport rect (ImGui coords)
   float vpRectMinX_ = 0, vpRectMinY_ = 0, vpRectMaxX_ = 0, vpRectMaxY_ = 0;
   static void glfwDropCallback(GLFWwindow* w, int count, const char** paths);
+  static void glfwFlyCursorPosCallback(GLFWwindow* w, double x, double y);
   void queueOsDrop(const char* path);
   void drainOsDrops();            // position-gate + ext dispatch (per frame)
   static int kindForPath(const std::string& path);  // ext -> BrowseKind, -1 unknown
@@ -353,6 +379,8 @@ private:
   bool scratchDirty_ = false;     // unsaved edits in scratchBuf_
   static constexpr int kScratchCap = 65536;  // source display/edit cap
   void openShaderScratch(const std::string& path);
+  /** add a .frag shader command to the selected/current scene and preview it */
+  void addShaderToScene(const std::string& path);
   void drawScratch();
   bool loadScratchSource(const std::string& path);  // fills src + edit buffer
   void saveScratch();             // write the buffer back + poke a reload
@@ -377,7 +405,10 @@ private:
   int beatDragIdx_ = 0;            // beat index of the dragged line
   float beatDragBase_ = 0;         // offset when the drag started (anchor)
   void detectKicks();              // (re)compute kickTimes_ from the envelope data
+  float estimateTrackBpm() const;  // infer tempo from transient spacing/envelope
+  void applyDetectedBpm();         // update the active project + runtime timeline
   void autoAlignBeats();           // fit grid phase to the detected kicks
+  float detectedBpm_ = 0.0f;       // last reliable estimate, shown in the audio UI
 
   // scrub quantization: when enabled, seekTo snaps the playhead + audio to the
   // nearest ALIGNED grid line (beatOffset_ + n*grid, so it follows the
@@ -489,6 +520,23 @@ private:
   float smokeExportSeconds_ = 3.0f;
   bool smokeExportStarted_ = false;
 
+  // --- NSD command authoring -------------------------------------------------
+  // A discoverable command palette for the full DSL. The generated source is
+  // intentionally editable so advanced users can reach every parser option
+  // without leaving the editor.
+  int nsdCommandIndex_ = 0;
+  int nsdCommandTarget_ = 0;  // 0 = selected scene setup, 1 = timeline/playhead
+  std::vector<char> nsdCommandBuf_ = std::vector<char>(8192, '\0');
+  std::string nsdCommandSeed_;
+  bool nsdCommandDirty_ = false;
+  void drawNsdCommands();
+  void seedNsdCommandSource();
+  bool insertNsdCommand();
+
+  // --- shader lab ------------------------------------------------------------
+  ShaderLab shaderLab_;
+  void insertShaderLabIntoTimeline();
+
   // --- impl -----------------------------------------------------------------
   void initImGui();
   void applyTheme();
@@ -571,6 +619,7 @@ private:
   void duplicateNode(SceneNode* n);
   void deleteNode(SceneNode* n);
   void handleKeys();
+  void togglePlayback();
   void toggleFullscreenPreview();
   static const char* iconFor(NodeType t);
   static const char* typeLabel(NodeType t);

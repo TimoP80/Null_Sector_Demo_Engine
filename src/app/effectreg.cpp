@@ -140,6 +140,11 @@ void registerBuiltinEffects() {
                                        p.get("handoff").asBool(false));
     e->mode = p.get("mode").asFloat(0);
     e->renderScale = p.get("renderScale").asFloat(1);
+    e->setFontFile(p.get("font").asStr());
+    e->setTextureFile(p.get("texture").asStr(), "uFillTexture", 1);
+    if (!p.get("textureMix").isNull()) e->extraUniforms["uTextureMix"] = p.get("textureMix").asFloat(1);
+    if (!p.get("textureScale").isNull()) e->extraUniforms["uTextureScale"] = p.get("textureScale").asFloat(1);
+    if (!p.get("textureScroll").isNull()) e->extraUniforms["uTextureScroll"] = p.get("textureScroll").asFloat(0);
     return e;
   });
 

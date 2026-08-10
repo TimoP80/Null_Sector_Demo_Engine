@@ -54,14 +54,14 @@ static int g_failed = 0;
 static void testJson() {
   const std::string src =
       R"({
-        "title": "GHOST IN THE MACHINE",
+        "title": "NULL SECTOR DEMO ENGINE",
         "bpm": 216.0,
         "flags": [true, false, null],
         "nested": { "a": [1, 2, { "b": "x" }], "ok": true }
       })";
   const Value v = Json::parse(src);
   CHECK(v.isObj(), "json object");
-  CHECK(v.get("title").asStr() == "GHOST IN THE MACHINE", "json string");
+  CHECK(v.get("title").asStr() == "NULL SECTOR DEMO ENGINE", "json string");
   CHECK_NEAR(v.get("bpm").asNum(), 216.0, 1e-9, "json number");
   CHECK(v.get("flags").size() == 3, "json array");
   CHECK(v.get("flags").atIndex(0).asBool(true) == true, "json bool");
@@ -74,7 +74,7 @@ static void testJson() {
   // round trip
   const std::string out = Json::serialize(v, 0);
   const Value v2 = Json::parse(out);
-  CHECK(v2.get("title").asStr() == "GHOST IN THE MACHINE", "json round trip");
+  CHECK(v2.get("title").asStr() == "NULL SECTOR DEMO ENGINE", "json round trip");
   CHECK(v2.at("nested.a.2.b").asStr() == "x", "json round trip nested");
 
   // errors
@@ -98,7 +98,7 @@ static void testJson() {
 static void testScriptParser() {
   // the exact example from the request
   const std::string src = R"(
-demo "GHOST IN THE MACHINE" {
+demo "NULL SECTOR DEMO ENGINE" {
     bpm 216
 }
 
@@ -140,7 +140,7 @@ at 40
 )";
   const Script s = ScriptParser::parse(src, "test");
   CHECK(s.bpm == 216.0f, "script bpm");
-  CHECK(s.title == "GHOST IN THE MACHINE", "script title");
+  CHECK(s.title == "NULL SECTOR DEMO ENGINE", "script title");
   CHECK(s.scenes.size() == 1, "one scene");
   CHECK(s.scenes[0].name == "Intro", "scene name");
   CHECK(s.scenes[0].bars == 60, "scene bars");
@@ -1401,7 +1401,7 @@ static void testDemoData() {
   //    into 4 sections with no unresolved shows, and only references effects
   //    + assets that ship with the engine - so a fresh clone can run it
   //    immediately (the request's "very small example production separate
-  //    from Ghost In The Machine")
+  //    from Null Sector Demo Engine")
   {
     ScriptEngine ex;
     CHECK(ex.load(dir + "/examples/ExampleDemo.nsd"), "ExampleDemo.nsd loads");
@@ -2141,6 +2141,7 @@ static void testNsdRoundTrip() {
       "    camera IntroCam { rig static; pos (0,0,2.4); fov 55 }\n"
       "    show intro\n"
       "    play music\n"
+      "    text caption { text HELLO WORLD pos (0,0,0); size 32 }\n"
       "    at 4 { anim introBloom post.bloom smooth { 0 1.2; 3 2.4; 6 1.5 } }\n"
       "}\n"
       "scene Nave {\n"
@@ -2155,6 +2156,14 @@ static void testNsdRoundTrip() {
   const Script a = ScriptParser::parse(src, "t");
   CHECK(a.scenes.size() == 2, "roundtrip: 2 scenes parsed");
   CHECK(a.main.size() == 4, "roundtrip: 4 main blocks parsed");
+  bool parsedBareText = false;
+  for (const auto& cmd : a.scenes[0].setup) {
+    if (cmd.name == "text" && cmd.opts.get("text").asStr() == "HELLO WORLD") {
+      parsedBareText = true;
+      break;
+    }
+  }
+  CHECK(parsedBareText, "roundtrip: unquoted text with spaces parses");
   const std::string out1 = nsdSerialize(a);
   const Script b = ScriptParser::parse(out1, "t1");
   CHECK(scriptEqual(a, b), "roundtrip: parse(serialize(parse(x))) == parse(x)");

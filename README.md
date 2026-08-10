@@ -7,7 +7,7 @@ A data-driven C++17/OpenGL demoscene production engine. The show is **data** —
 post-processing — and the engine just plays it. New productions need little or
 no C++.
 
-The flagship production, **Ghost In The Machine**, ships as `data/demo.nsd`
+The flagship production, **Null Sector Demo Engine**, ships as `data/demo.nsd`
 plus the shaders and assets it references. A tiny second production,
 `data/examples/ExampleDemo.nsd`, demonstrates the whole format on one page.
 
@@ -31,6 +31,7 @@ cmake --build build --config Release
 # open the editor (document + undo, curves, markers, timeline, drops…)
 # Ctrl+S saves the .nsd document, Ctrl+Z / Ctrl+Y undo / redo
 ./build/Release/ns_demo.exe --editor
+# then open View > Shader Lab for typography presets, live GLSL and audio-reactive preview
 
 # ...or from inside the editor: File > Export MP4... (save dialog + live progress)
 #   (captures the current window resolution; resize the window to change it)
@@ -148,10 +149,10 @@ loaders never know where the bytes came from.
 ./build/Release/ns_demo.exe --editor
 
 # Create a package (headless; walks the .nsd's referenced assets)
-./build/Release/ns_demo.exe --pack data/demo.nsd --output GhostInTheMachine.nsp
+./build/Release/ns_demo.exe --pack data/demo.nsd --output NullSectorDemoEngine.nsp
 
 # Playback: mount the package — no data/ directory needed
-./build/Release/ns_demo.exe --play GhostInTheMachine.nsp
+./build/Release/ns_demo.exe --play NullSectorDemoEngine.nsp
 ```
 
 The `.nsp` format is a simple versioned container (magic `NSPK`, file table,
