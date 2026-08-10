@@ -2,6 +2,9 @@
 
 # Null Sector Demo Engine
 
+NOTE: this project is still a work in progress and not all functionality
+has been properly tested.
+
 A data-driven C++17/OpenGL demoscene production engine. The show is **data** —
 a `.nsd` script describes scenes, cameras, effects, animations, audio and
 post-processing — and the engine just plays it. New productions need little or
