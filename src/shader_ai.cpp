@@ -1,10 +1,13 @@
 #include "shader_ai.hpp"
 
+#include "framework/vfs/miniz/miniz_tdef.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -465,6 +468,8 @@ std::string remotePrompt(const GenerationRequest& r, bool repair) {
        "uColor2, uIntensity, uSpeed, uScale. Include // @param metadata. Keep loops bounded and "
        "avoid undefined engine APIs.\n";
   s << "Shader type: " << shaderKindName(r.kind) << "\n";
+  if (!repair && !r.staticHint.empty())
+    s << "Static source hint (advisory, from source inspection): " << r.staticHint << "\n";
   if (repair) s << "Repair this shader without changing its visual intent. Compiler diagnostics:\n" << r.diagnostics << "\n";
   else s << "Create or modify the effect from this request:\n" << r.prompt << "\n";
   if (repair) {
@@ -611,11 +616,40 @@ GeneratedShader remoteCall(const GenerationRequest& r, bool repair) {
                              modelName.rfind("o3", 0) == 0 ||
                              modelName.rfind("o4", 0) == 0;
   const bool responsesApi = lower(r.config.endpoint).find("/responses") != std::string::npos;
+  // Multi-modal repair: when the failing frame was captured and the provider
+  // config opts into image feedback, the repair request carries the rendered
+  // frame as a vision part instead of a bare text message - models that can
+  // see the actual magenta/black screen do dramatically better at fixing it.
+  const std::string prompt = remotePrompt(r, repair);
+  const bool vision = repair && !r.repairImageDataUrl.empty() && r.config.sendRepairImage;
+  auto visionContent = [&]() {
+    Value content = Value::array();
+    Value textPart = Value::object();
+    textPart.set("type") = Value(responsesApi ? "input_text" : "text");
+    textPart.set("text") = Value(prompt);
+    content.push(std::move(textPart));
+    Value imgPart = Value::object();
+    imgPart.set("type") = Value(responsesApi ? "input_image" : "image_url");
+    Value imgUrl = Value::object();
+    imgUrl.set("url") = Value(r.repairImageDataUrl);
+    imgPart.set("image_url") = std::move(imgUrl);
+    content.push(std::move(imgPart));
+    return content;
+  };
   if (responsesApi) {
     // The Responses API uses input/max_output_tokens rather than the
     // Chat-Completions messages/max_tokens fields.
     root.set("max_output_tokens") = Value(r.config.maxTokens);
-    root.set("input") = Value(remotePrompt(r, repair));
+    if (vision) {
+      Value item = Value::object();
+      item.set("role") = Value("user");
+      item.set("content") = visionContent();
+      Value input = Value::array();
+      input.push(std::move(item));
+      root.set("input") = std::move(input);
+    } else {
+      root.set("input") = Value(prompt);
+    }
   } else {
     if (reasoningModel) root.set("max_completion_tokens") = Value(r.config.maxTokens);
     else {
@@ -625,7 +659,8 @@ GeneratedShader remoteCall(const GenerationRequest& r, bool repair) {
     Value messages = Value::array();
     Value msg = Value::object();
     msg.set("role") = Value("user");
-    msg.set("content") = Value(remotePrompt(r, repair));
+    if (vision) msg.set("content") = visionContent();
+    else msg.set("content") = Value(prompt);
     messages.push(std::move(msg));
     root.set("messages") = std::move(messages);
   }
@@ -703,6 +738,55 @@ bool hexDecode(const std::string& text, std::vector<unsigned char>& out) {
 #endif
 
 } // namespace
+
+static std::string base64Encode(const unsigned char* data, size_t size) {
+  static const char* kTable =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve(((size + 2) / 3) * 4);
+  for (size_t i = 0; i < size; i += 3) {
+    const unsigned b0 = data[i];
+    const unsigned b1 = i + 1 < size ? data[i + 1] : 0;
+    const unsigned b2 = i + 2 < size ? data[i + 2] : 0;
+    const unsigned n = (b0 << 16) | (b1 << 8) | b2;
+    out.push_back(kTable[(n >> 18) & 63]);
+    out.push_back(kTable[(n >> 12) & 63]);
+    out.push_back(i + 1 < size ? kTable[(n >> 6) & 63] : '=');
+    out.push_back(i + 2 < size ? kTable[n & 63] : '=');
+  }
+  return out;
+}
+
+std::string encodePngDataUrl(const unsigned char* rgba, int w, int h) {
+  if (!rgba || w <= 0 || h <= 0) return "";
+  // GL readback is bottom-up; PNG is top-down. Flip rows for a correct frame.
+  const size_t rowBytes = (size_t)w * 4;
+  std::vector<unsigned char> flipped((size_t)w * (size_t)h * 4);
+  for (int y = 0; y < h; ++y)
+    std::memcpy(flipped.data() + (size_t)(h - 1 - y) * rowBytes,
+                rgba + (size_t)y * rowBytes, rowBytes);
+  size_t pngLen = 0;
+  void* png = tdefl_write_image_to_png_file_in_memory(flipped.data(), w, h, 4, &pngLen);
+  if (!png || pngLen == 0) return "";
+  const std::string b64 = base64Encode(static_cast<const unsigned char*>(png), pngLen);
+  MZ_FREE(png);
+  if (b64.empty()) return "";
+  return "data:image/png;base64," + b64;
+}
+
+std::string spatialLintHint(const std::string& source) {
+  // Conservative static check for the classic degenerate generation: no
+  // per-pixel input anywhere in the source. Any vUV / gl_FragCoord / texture()
+  // / `uv` reference means the analysis is inconclusive and we stay quiet -
+  // a hint is a nudge for the prompt, never a verdict.
+  if (source.find("vUV") != std::string::npos) return "";
+  if (source.find("gl_FragCoord") != std::string::npos) return "";
+  if (source.find("texture(") != std::string::npos) return "";
+  if (source.find("uv") != std::string::npos) return "";
+  return "the current source has no per-pixel input (no vUV, gl_FragCoord or texture() "
+         "use) - every pixel would render the same color; the generated shader MUST "
+         "derive its output from the pixel position";
+}
 
 #ifdef _WIN32
 bool downloadUrlToFile(const std::string& url, const std::string& destPath, std::string* error,
@@ -865,6 +949,9 @@ bool saveShaderAiSettings(const std::string& file, const ProviderConfig& config,
     root.set("timeoutSeconds") = Value(config.timeoutSeconds);
     root.set("channelRetryMaxAttempts") = Value(config.channelRetryMaxAttempts);
     root.set("channelRetryBackoffMs") = Value(config.channelRetryBackoffMs);
+    root.set("autoRepairEnabled") = Value(config.autoRepairEnabled);
+    root.set("autoRepairMax") = Value(config.autoRepairMax);
+    root.set("sendRepairImage") = Value(config.sendRepairImage);
 #ifdef _WIN32
     std::string protectedKey;
     if (!config.apiKey.empty()) {
@@ -903,6 +990,9 @@ bool loadShaderAiSettings(const std::string& file, ProviderConfig& config, std::
     config.timeoutSeconds = root.get("timeoutSeconds").asInt(config.timeoutSeconds);
     config.channelRetryMaxAttempts = root.get("channelRetryMaxAttempts").asInt(config.channelRetryMaxAttempts);
     config.channelRetryBackoffMs = root.get("channelRetryBackoffMs").asInt(config.channelRetryBackoffMs);
+    config.autoRepairEnabled = root.get("autoRepairEnabled").asBool(config.autoRepairEnabled);
+    config.autoRepairMax = root.get("autoRepairMax").asInt(config.autoRepairMax);
+    config.sendRepairImage = root.get("sendRepairImage").asBool(config.sendRepairImage);
     const std::string storedKey = root.get("apiKey").asStr();
 #ifdef _WIN32
     if (root.get("apiKeyProtected").asBool(false)) {

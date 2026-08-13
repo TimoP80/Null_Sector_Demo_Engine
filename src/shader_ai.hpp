@@ -49,6 +49,15 @@ struct ProviderConfig {
   // settings; the active attempt is shown in the Texture Channels row.
   int channelRetryMaxAttempts = 3;
   int channelRetryBackoffMs = 1200;
+  // Preview self-check behavior (persisted with the provider settings):
+  // auto-repair re-asks the model when a FRESH generation renders a degenerate
+  // frame (never drew / uniform / near-black), up to autoRepairMax times per
+  // generation (0 disables the auto path entirely - the warning stays);
+  // sendRepairImage attaches the failing frame as a vision input on repair
+  // (OpenAI-compatible providers that support images).
+  bool autoRepairEnabled = true;
+  int autoRepairMax = 1;
+  bool sendRepairImage = false;
 };
 
 struct AvailableModel {
@@ -66,6 +75,12 @@ struct GenerationRequest {
   std::string currentVertex;
   std::string diagnostics;
   ProviderConfig config;
+  // Advisory static analysis of the current source ("this output has no
+  // per-pixel term"), appended to fresh-generation prompts before any render.
+  std::string staticHint;
+  // Base64 PNG data URL of the failing frame, attached as a vision input on
+  // repair when the provider config allows it.
+  std::string repairImageDataUrl;
 };
 
 struct GeneratedShader {
@@ -174,6 +189,18 @@ struct ShaderAiProject {
   bool save(const std::string& file, std::string* error = nullptr) const;
   bool load(const std::string& file, std::string* error = nullptr);
 };
+
+/** Advisory static lint: does the current source reference any per-pixel
+ *  input (vUV / gl_FragCoord / a texture lookup / a `uv` variable)? Returns a
+ *  hint string when the source has none - the classic degenerate generation -
+ *  and an empty string when it looks positional or the analysis is
+ *  inconclusive. Deliberately conservative: a hint is a nudge, never a fail. */
+std::string spatialLintHint(const std::string& source);
+
+/** Encode raw RGBA8 pixels (OpenGL bottom-up row order) as a base64 PNG data
+ *  URL, or an empty string on failure. Used to send the failing frame to
+ *  vision-capable providers on repair. */
+std::string encodePngDataUrl(const unsigned char* rgba, int w, int h);
 
 /** Parse common desktop GLSL compiler formats into a clickable line/column. */
 struct ShaderDiagnostic {

@@ -85,6 +85,10 @@ private:
   int previewW_ = 960, previewH_ = 540;
 
   FrameTarget preview_;
+  // Degenerate-output detection ("solid color" shaders) lives in the shared
+  // engine RenderProbe; the verdict lands in flatOutput_ + compileWarning_.
+  bool flatOutput_ = false;
+  std::string compileWarning_;
   std::unique_ptr<Shader> program_;
   std::string previewFile_;
   std::string exportedPath_;
@@ -141,6 +145,7 @@ private:
   void rebuildSourceFromPreset();
   void parseMetadata();
   bool compile();
+  void runOutputProbe();
   bool ensurePreview(int w, int h);
   void bindUniforms(float time, float dt);
   std::string makeSource(int style) const;

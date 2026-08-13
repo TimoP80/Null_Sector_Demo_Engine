@@ -226,7 +226,7 @@ int nsDemoMain(int argc, char** argv) {
       perfRawPath, checkProductionPath, shotFile;
   std::string packArg, outputArg, playArg, rootArg;  // --pack / --output / --play / --root
   bool noTrack = false, checkShaders = false, smokeAudio = false, checkModels = false,
-       checkHotReload = false, checkShadertoy = false;
+       checkHotReload = false, checkShadertoy = false, checkRender = false;
   float shotSeconds = -1;  // --shot=SECONDS:FILE.bmp: seek there, save one frame, exit
   bool shotNoSeek = false;  // --shot-noseek: run from 0, capture at target
 #ifndef NULLSECTOR_RUNTIME_ONLY
@@ -248,6 +248,7 @@ int nsDemoMain(int argc, char** argv) {
     if (a == "--check-production") checkProductionPath = AppAssets::dataDir() + "/demo.nsd";
     else if (a.rfind("--check-production=", 0) == 0) checkProductionPath = a.substr(19);
     else if (a == "--check-shaders") checkShaders = true;
+    else if (a == "--render") checkRender = true;
     else if (a == "--check-models") checkModels = true;
     else if (a == "--check-hotreload") checkHotReload = true;
     else if (a == "--check-shadertoy") checkShadertoy = true;
@@ -303,6 +304,9 @@ int nsDemoMain(int argc, char** argv) {
                   "                  the .nsd + verify every scene/effect/asset/rig reference\n"
                   "                  resolves (default: data/demo.nsd), then exit 0/1\n"
                   "  --check-shaders  compile every engine + app shader stage, then exit\n"
+                  "                  (with --render: also render every self-contained\n"
+                  "                  content shader offscreen + readback, flagging shaders\n"
+                  "                  that never drew / render a solid color / go near-black)\n"
                   "  --check-models   headless-ish 3D pipeline preflight, then exit\n"
                   "  --check-hotreload  live-reload smoke (break+fix a temp shader), then exit\n"
                   "  --check-shadertoy  render data/shadertoy/*.glsl offscreen + readback, then exit\n"
@@ -458,6 +462,16 @@ int nsDemoMain(int argc, char** argv) {
     } catch (const std::exception& e) {
       std::fprintf(stderr, "[SHADER] app preflight failed: %s\n", e.what());
       rc = 1;
+    }
+    // --check-shaders --render: also render every self-contained content
+    // shader offscreen at several instants and flag degenerate output (never
+    // drew / solid color / near-black) - the same class of bug the AI
+    // generator self-heals against, caught here before it ships.
+    if (checkRender) {
+      const ShaderCheckResult r = checkShadersRender();
+      std::fprintf(stderr, "[SHADER-RENDER] preflight: %d/%d render checks ok\n", r.ok, r.total);
+      for (const auto& f : r.failedFiles) std::fprintf(stderr, "[SHADER-RENDER] FAIL: %s\n", f.c_str());
+      if (r.failed > 0) rc = 1;
     }
     glfwDestroyWindow(g_window);
     glfwTerminate();

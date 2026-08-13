@@ -14,6 +14,7 @@
 #include "engine/gl.hpp"
 #include "engine/mesh.hpp"
 #include "engine/paths.hpp"
+#include "engine/renderprobe.hpp"
 #include "engine/shader.hpp"
 #include "engine/texture.hpp"
 #include "framework/vfs/directoryfs.hpp"
@@ -407,9 +408,15 @@ public:
     const std::string before = fragment_;
     if (!fragment_.empty()) {
       ShaderAiVersion v;
-      v.label = label; v.prompt = prompt_; v.fragment = fragment_; v.vertex = vertex_; v.specification = specification_;
+      // The source being preserved is the CURRENT version, so the history
+      // entry is labeled with what it actually contains - not with the
+      // incoming generation's label, which belongs to the source about to
+      // become current (that was an off-by-one history-labeling bug).
+      v.label = currentVersionLabel_;
+      v.prompt = prompt_; v.fragment = fragment_; v.vertex = vertex_; v.specification = specification_;
       history_.push_back(std::move(v));
     }
+    currentVersionLabel_ = label;
     kind_ = g.kind;
     fragment_ = g.fragment;
     vertex_ = g.vertex;
@@ -450,24 +457,23 @@ public:
     editClock_ = nowSeconds();
   }
 
-  /** Render the just-compiled program to a tiny target and read the pixels
-   *  back. Returns true when the output is (nearly) one uniform color at
-   *  several instants - i.e. the shader never uses the pixel position, the
-   *  "flashing solid colors" degenerate case. Sample times avoid t=0 so a
-   *  spatial term multiplied by sin(uTime) is not misread as flat. */
-  bool checkFlatOutput() {
-    if (!validProgram_ || !fsTriangle_) return false;
-    const int W = 64, H = 64;
-    if (flatFbo_.w != W || flatFbo_.h != H) {
-      flatFbo_ = FrameTarget::color(W, H, ::gl::RGBA8, ::gl::RGBA, ::gl::UNSIGNED_BYTE,
-                                    {::gl::LINEAR, ::gl::LINEAR, ::gl::CLAMP_TO_EDGE, false});
+  /** Probe the compiled program through the shared engine RenderProbe: render
+   *  to a tiny target at two non-zero instants and read the pixels back. The
+   *  result classifies never-drew / uniform / time-only / near-black outputs.
+   *  Sample times avoid t=0 so a spatial term multiplied by sin(uTime) is not
+   *  misread as flat. Binds samplers exactly like renderPreview so a
+   *  channel-only shader is not misread as flat because its unit is unbound. */
+  RenderProbeResult runOutputProbe() {
+    if (!validProgram_ || !fsTriangle_) {
+      RenderProbeResult inconclusive;  // fboOk=false: no verdict, never "degenerate"
+      inconclusive.fboOk = false;
+      return inconclusive;
     }
+    const int W = 64, H = 64;
+    lastProbeW_ = W;
+    lastProbeH_ = H;
     const float bpm = 128.0f;
-    auto renderAt = [&](float t, std::vector<unsigned char>& out) {
-      flatFbo_.bind();
-      ::glDisable(::gl::BLEND); ::glDisable(::gl::DEPTH_TEST);
-      ::glClearColor(0.002f, 0.004f, 0.012f, 1.0f);
-      ::glClear(::gl::COLOR_BUFFER_BIT);
+    return probeRender(W, H, {0.37f, 1.13f}, [&](float t) {
       validProgram_->use();
       validProgram_->set2f("uResolution", (float)W, (float)H);
       const float beat = t * bpm / 60.0f;
@@ -516,27 +522,7 @@ public:
       }
       ::glActiveTexture(::gl::TEXTURE0);
       fsTriangle_->draw(3);
-      // read back while the offscreen target is still bound - reading after
-      // unbinding would sample the window's back buffer instead
-      ::glReadPixels(0, 0, W, H, ::gl::RGBA, ::gl::UNSIGNED_BYTE, out.data());
-      ::glBindFramebuffer(::gl::FRAMEBUFFER, 0);
-    };
-    const int kFlatDelta = 8;  // max channel delta (of 255) that still counts as solid
-    std::vector<unsigned char> px((size_t)W * H * 4);
-    for (const float t : {0.37f, 1.13f}) {
-      renderAt(t, px);
-      unsigned char lo[3] = {255, 255, 255}, hi[3] = {0, 0, 0};
-      for (size_t i = 0; i < px.size(); i += 4) {
-        for (int c = 0; c < 3; ++c) {
-          const unsigned char v = px[i + (size_t)c];
-          if (v < lo[c]) lo[c] = v;
-          if (v > hi[c]) hi[c] = v;
-        }
-      }
-      const int maxDelta = std::max({(int)hi[0] - lo[0], (int)hi[1] - lo[1], (int)hi[2] - lo[2]});
-      if (maxDelta > kFlatDelta) return false;  // spatial variation found at this instant
-    }
-    return true;  // uniform color at every sampled instant
+    });
   }
 
   bool compileNow() {
@@ -570,16 +556,21 @@ public:
       invalidatePreview();
       previewTime_ = 0.0f;
       // A shader that compiles is not necessarily a shader that shows
-      // anything: catch time-only outputs that render as one flashing solid
-      // color and surface them instead of accepting them silently.
-      flatOutput_ = checkFlatOutput();
-      if (flatOutput_) {
-        diagnostics_ = "Preview check: this shader renders as one uniform solid color (every pixel "
-                       "identical) - it never uses the pixel position. Add spatial variation, e.g. "
-                       "declare `in vec2 vUV;` and use it, or compute `vec2 uv = gl_FragCoord.xy / "
-                       "uResolution;`, and make the output depend on `uv` (not only on uTime).";
-        status_ = "Compiled successfully - warning: renders as a uniform color (no per-pixel "
-                  "variation) - edit the source or Ask AI to Fix";
+      // anything: classify the rendered output (never drew / uniform /
+      // time-only / near-black) via the shared engine RenderProbe and surface
+      // degenerate frames instead of accepting them silently.
+      lastProbe_ = runOutputProbe();
+      flatOutput_ = lastProbe_.uniform;  // amber status for the uniform-color class
+      repairImageDataUrl_.clear();
+      if (lastProbe_.degenerate() && !lastProbe_.pixels.empty() && lastProbeW_ > 0 && lastProbeH_ > 0)
+        repairImageDataUrl_ = encodePngDataUrl(lastProbe_.pixels.data(), lastProbeW_, lastProbeH_);
+      if (lastProbe_.degenerate()) {
+        diagnostics_ = "Preview check: " + lastProbe_.diagnosis() +
+                       " Add spatial variation, e.g. declare `in vec2 vUV;` and use it, or "
+                       "compute `vec2 uv = gl_FragCoord.xy / uResolution;`, and make the output "
+                       "depend on `uv` (not only on uTime).";
+        status_ = "Compiled successfully - warning: renders a degenerate frame (see the "
+                  "Diagnostics tab) - edit the source or Ask AI to Fix";
       } else {
         diagnostics_.clear();
         status_ = "Compiled successfully - previous valid preview replaced";
@@ -690,9 +681,40 @@ public:
       status_ = "Shader received (" + std::to_string(g.fragment.size()) + " fragment bytes) - compiling";
       if (compileNow()) {
         conversation_ = explanation_;
-        status_ = "Applied generated shader (request #" + std::to_string(generationSerial_) + ")";
-        if (flatOutput_)
-          status_ += " - warning: renders as a uniform color - Ask AI to Fix or edit the source";
+        // Severity-driven self-heal: a FRESH generation whose output is in any
+        // degenerate class (never drew / uniform / time-only / near-black) is
+        // re-asked up to providerConfig_.autoRepairMax times before falling
+        // back to the warning. The diagnosis is still in diagnostics_, so each
+        // repair prompt carries it and the model gets a real chance to fix it.
+        // A repair's own result never re-triggers the chain (generationIsRepair_).
+        const bool degenerate = lastProbe_.degenerate();
+        if (degenerate && !generationIsRepair_ && providerConfig_.autoRepairEnabled &&
+            autoRepairsUsed_ < std::max(0, providerConfig_.autoRepairMax)) {
+          ++autoRepairsUsed_;
+          std::printf("[SHADER-AI][TRACE] Generate #%d degenerate-output auto-repair: re-asking %d/%d (%s)\n",
+                      generationSerial_, autoRepairsUsed_, providerConfig_.autoRepairMax,
+                      lastProbe_.diagnosis().c_str());
+          std::fflush(stdout);
+          generate(true, /*autoRepair=*/true);
+          status_ = "Generated shader renders degenerate output - auto-repairing (" +
+                    std::to_string(autoRepairsUsed_) + "/" +
+                    std::to_string(providerConfig_.autoRepairMax) + ")...";
+          return;
+        }
+        if (degenerate) {
+          status_ = "Applied generated shader (request #" + std::to_string(generationSerial_) + ")" +
+                    (autoRepairsUsed_ > 0
+                         ? " (auto-repaired " + std::to_string(autoRepairsUsed_) + "x - " +
+                               std::to_string(autoRepairsUsed_ + 1) + " requests)"
+                         : "") +
+                    " - warning: renders a degenerate frame - Ask AI to Fix or edit the source";
+        } else {
+          status_ = "Applied generated shader (request #" + std::to_string(generationSerial_) + ")" +
+                    (autoRepairsUsed_ > 0
+                         ? " (auto-repaired " + std::to_string(autoRepairsUsed_) + "x - " +
+                               std::to_string(autoRepairsUsed_ + 1) + " requests)"
+                         : "");
+        }
       }
     } catch (const std::exception& e) {
       std::printf("[SHADER-AI][TRACE] Generate #%d RESULT FAILED: %s", generationSerial_, e.what());
@@ -703,9 +725,10 @@ public:
     }
   }
 
-  void generate(bool repair = false) {
+  void generate(bool repair = false, bool autoRepair = false) {
     const int clickId = generationSerial_ + 1;
-    std::printf("[SHADER-AI][TRACE] Generate #%d GENERATE CLICKED action=%s", clickId, repair ? "repair" : "generate");
+    std::printf("[SHADER-AI][TRACE] Generate #%d GENERATE CLICKED action=%s%s", clickId,
+                repair ? "repair" : "generate", autoRepair ? " (auto)" : "");
     std::putchar('\n');
     std::fflush(stdout);
     if (generationInFlight_) {
@@ -715,6 +738,9 @@ public:
     GenerationRequest req;
     req.kind = kind_; req.prompt = promptBuf_.data(); req.currentFragment = fragment_; req.currentVertex = vertex_;
     req.diagnostics = diagnostics_; req.config = providerConfig_;
+    if (!repair) req.staticHint = spatialLintHint(fragment_);
+    if (repair && providerConfig_.sendRepairImage && !repairImageDataUrl_.empty())
+      req.repairImageDataUrl = repairImageDataUrl_;
     const int requestId = ++generationSerial_;
     req.generationId = requestId;
     std::printf("[SHADER-AI][TRACE] Generate #%d REQUEST STARTED provider=%s model=%s prompt-length=%zu", requestId, providerConfig_.provider.c_str(), providerConfig_.model.c_str(), req.prompt.size());
@@ -724,6 +750,11 @@ public:
     provider_ = makeShaderAiProvider(providerConfig_);
     status_ = repair ? "Asking AI to repair shader..." : "Generating shader...";
     diagnostics_.clear();
+    // The auto-repair chain counter: a fresh generation (or a manual repair)
+    // starts a new chain at 0; the auto path bumps it so the status line can
+    // show "auto-repair 1/N" and the final request count.
+    if (!repair || !autoRepair) autoRepairsUsed_ = 0;
+    generationIsRepair_ = repair;
     generationInFlight_ = true;
     generationFuture_ = std::async(std::launch::async, [req = std::move(req), repair]() {
       auto provider = makeShaderAiProvider(req.config);
@@ -739,6 +770,7 @@ public:
     ++sourceWidgetRevision_;
     params_ = parseShaderParams(fragment_); sourceDirty_ = true; compileQueued_ = false; compileNow();
     status_ = "Restored " + v.label;
+    currentVersionLabel_ = v.label;
   }
 
   bool saveShaders(const std::string& path) {
@@ -766,6 +798,7 @@ public:
     ShaderAiProject p; std::string error;
     if (!p.load(path, &error)) { status_ = "Project load failed: " + error; return false; }
     kind_ = p.kind; prompt_ = p.prompt; specification_ = p.specification; fragment_ = p.fragment; vertex_ = p.vertex; history_ = p.history; projectPath_ = path;
+    currentVersionLabel_ = "Current";
     promptBuf_ = textBuffer(prompt_); specBuf_ = textBuffer(specification_, 8192); fragBuf_ = textBuffer(fragment_); vertBuf_ = textBuffer(vertex_); ++sourceWidgetRevision_; params_ = parseShaderParams(fragment_);
     previewSpeed_ = p.previewSpeed; previewW_ = p.previewWidth; previewH_ = p.previewHeight; sourceDirty_ = true; compileNow();
     // a freshly loaded document supersedes any previous channel download state
@@ -1459,7 +1492,7 @@ public:
 
   void drawSettings() {
     if (!showSettings_) return;
-    ImGui::SetNextWindowSize(ImVec2(560, 470), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(580, 600), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("AI Provider Settings", &showSettings_)) { ImGui::End(); return; }
     char provider[96] = {}; std::snprintf(provider, sizeof(provider), "%s", providerConfig_.provider.c_str());
     char endpoint[256] = {}; std::snprintf(endpoint, sizeof(endpoint), "%s", providerConfig_.endpoint.c_str());
@@ -1492,6 +1525,14 @@ public:
     ImGui::SliderInt("Retry attempts", &providerConfig_.channelRetryMaxAttempts, 1, 5);
     ImGui::SliderInt("Retry backoff (ms)", &providerConfig_.channelRetryBackoffMs, 0, 10000);
     ImGui::TextDisabled("Transient channel-texture download failures (timeouts, transport errors, HTTP 5xx) retry up to this many attempts with the wait growing by the backoff each time; HTTP 4xx is never retried. The active attempt shows in the Texture Channels row.");
+    ImGui::SeparatorText("Preview self-check");
+    ImGui::Checkbox("Auto-repair degenerate generations (never drew / uniform / near-black)", &providerConfig_.autoRepairEnabled);
+    if (providerConfig_.autoRepairEnabled) {
+      ImGui::SliderInt("Max auto-repairs per generation", &providerConfig_.autoRepairMax, 0, 3);
+      ImGui::TextDisabled("0 = never re-ask automatically (the warning stays). Each automatic repair costs one extra API request - the counter and total request count show in the status line.");
+    }
+    ImGui::Checkbox("Send the failing frame image to the model on repair (vision)", &providerConfig_.sendRepairImage);
+    ImGui::TextDisabled("Attaches the captured render as an image part on repair, for image-capable OpenAI-compatible models - bigger requests, but the model sees the actual broken frame.");
     ImGui::SeparatorText("Settings");
     if (ImGui::Button("Save settings")) saveSettings();
     ImGui::SameLine();
@@ -1773,6 +1814,78 @@ public:
       return 25;
     }
 
+    // Auto-repair: a fresh generation that renders flat must trigger exactly
+    // one automatic re-ask, a successful repair must be applied, and a flat
+    // repair result must NOT trigger a second automatic ask. The provider
+    // results are injected as ready futures so the real pollGeneration() path
+    // (apply -> compile -> flat check -> re-ask) is exercised deterministically
+    // without a network provider.
+    {
+      providerConfig_.provider = "builtin-demoscene";
+      providerConfig_.apiKey.clear();
+      const std::string flatSrc = "#version 300 es\nout vec4 fragColor;\nuniform float uTime;\n"
+                                  "void main() { fragColor = vec4(fract(uTime), 0.5, 0.5, 1.0); }\n";
+      const std::string spatialSrc = "#version 300 es\nin vec2 vUV;\nout vec4 fragColor;\n"
+                                     "void main() { fragColor = vec4(vUV.x, 0.5, 0.5, 1.0); }\n";
+      GeneratedShader flatGen; flatGen.kind = ShaderKind::Fragment; flatGen.fragment = flatSrc;
+      GeneratedShader spatialGen; spatialGen.kind = ShaderKind::Fragment; spatialGen.fragment = spatialSrc;
+
+      // (1) a fresh flat generation -> pollGeneration applies it and re-asks once
+      generationIsRepair_ = false;
+      autoRepairsUsed_ = 0;
+      generationInFlight_ = true;
+      { std::promise<GeneratedShader> pr; pr.set_value(flatGen); generationFuture_ = pr.get_future(); }
+      const int serialBefore = generationSerial_;
+      pollGeneration();
+      if (!generationInFlight_ || generationSerial_ != serialBefore + 1 || !generationIsRepair_ ||
+          autoRepairsUsed_ != 1) {
+        std::printf("[SHADER-AI] smoke: flat auto-repair did not re-ask once (inflight=%d serial=%d->%d repair=%d auto=%d)\n",
+                    (int)generationInFlight_, serialBefore, generationSerial_, (int)generationIsRepair_,
+                    autoRepairsUsed_);
+        return 30;
+      }
+
+      // (2) the repaired (spatial) result -> applied, no further re-ask
+      { std::promise<GeneratedShader> pr; pr.set_value(spatialGen); generationFuture_ = pr.get_future(); }
+      pollGeneration();
+      if (generationInFlight_ || flatOutput_ || !diagnostics_.empty()) {
+        std::printf("[SHADER-AI] smoke: auto-repair result handling FAIL (inflight=%d flat=%d diagnostics=%zu)\n",
+                    (int)generationInFlight_, (int)flatOutput_, diagnostics_.size());
+        return 31;
+      }
+
+      // (3) a flat repair result -> warned, but NOT re-asked again
+      generationIsRepair_ = true;
+      generationInFlight_ = true;
+      { std::promise<GeneratedShader> pr; pr.set_value(flatGen); generationFuture_ = pr.get_future(); }
+      const int serialBefore2 = generationSerial_;
+      pollGeneration();
+      if (generationInFlight_ || generationSerial_ != serialBefore2 || !flatOutput_ ||
+          autoRepairsUsed_ != 1) {
+        std::printf("[SHADER-AI] smoke: flat repair wrongly auto-re-asked (inflight=%d serial=%d->%d flat=%d auto=%d)\n",
+                    (int)generationInFlight_, serialBefore2, generationSerial_, (int)flatOutput_,
+                    autoRepairsUsed_);
+        return 32;
+      }
+      generationIsRepair_ = false;
+      autoRepairsUsed_ = 0;
+    }
+
+    // PNG frame encoding (the vision repair input): a small RGBA buffer must
+    // produce a base64 PNG data URL with a valid signature.
+    {
+      std::vector<unsigned char> rgba((size_t)4 * 4 * 4, 128);
+      const std::string dataUrl = encodePngDataUrl(rgba.data(), 4, 4);
+      if (dataUrl.rfind("data:image/png;base64,", 0) != 0) {
+        std::printf("[SHADER-AI] smoke: PNG data URL encoding FAIL (len=%zu)\n", dataUrl.size());
+        return 33;
+      }
+      if (dataUrl.find("iVBOR") == std::string::npos) {  // base64 of the PNG magic
+        std::printf("[SHADER-AI] smoke: PNG signature missing from data URL\n");
+        return 34;
+      }
+    }
+
     applyGenerated(g, "Smoke Pair Restore");
     if (!compileNow()) return 23;
     const unsigned oldProgram = validProgram_ ? validProgram_->id() : 0;
@@ -1806,6 +1919,9 @@ public:
       savedConfig.timeoutSeconds = 750;
       savedConfig.channelRetryMaxAttempts = 5;
       savedConfig.channelRetryBackoffMs = 2500;
+      savedConfig.autoRepairEnabled = false;
+      savedConfig.autoRepairMax = 2;
+      savedConfig.sendRepairImage = true;
       const std::string settingsFile = (std::filesystem::path(dataDir_) / ".shader_ai_settings_smoke.json").string();
       std::string settingsError;
       if (!saveShaderAiSettings(settingsFile, savedConfig, &settingsError)) return 9;
@@ -1816,7 +1932,10 @@ public:
           loadedConfig.maxTokens != savedConfig.maxTokens ||
           loadedConfig.timeoutSeconds != savedConfig.timeoutSeconds ||
           loadedConfig.channelRetryMaxAttempts != savedConfig.channelRetryMaxAttempts ||
-          loadedConfig.channelRetryBackoffMs != savedConfig.channelRetryBackoffMs) return 10;
+          loadedConfig.channelRetryBackoffMs != savedConfig.channelRetryBackoffMs ||
+          loadedConfig.autoRepairEnabled != savedConfig.autoRepairEnabled ||
+          loadedConfig.autoRepairMax != savedConfig.autoRepairMax ||
+          loadedConfig.sendRepairImage != savedConfig.sendRepairImage) return 10;
       std::filesystem::remove(settingsFile, ec);
     }
     std::filesystem::remove(path, ec);
@@ -2220,12 +2339,15 @@ private:
   GLFWwindow* window_ = nullptr;
   std::string shaderDir_, dataDir_, settingsPath_;
   FrameTarget preview_;
-  // tiny offscreen target used to detect degenerate "solid color" shaders:
-  // the compiled program is rendered and read back; if every pixel matches at
-  // several instants, the shader never uses the pixel position and the user
-  // (and the repair prompt) are told so instead of silently flashing colors.
-  FrameTarget flatFbo_;
-  bool flatOutput_ = false;
+  // Degenerate-output detection ("solid color" / never-drew / near-black
+  // shaders) lives in the shared engine RenderProbe; the last verdict is kept
+  // here for the UI and the auto-repair path, and the captured frame is PNG-
+  // encoded for vision-capable repair requests.
+  RenderProbeResult lastProbe_;
+  int lastProbeW_ = 0, lastProbeH_ = 0;
+  bool flatOutput_ = false;  // uniform-color class (drives the amber status)
+  std::string repairImageDataUrl_;
+  std::string currentVersionLabel_ = "Version 1";
   std::unique_ptr<Mesh> fsTriangle_;
   std::unique_ptr<Shader> validProgram_;
   std::unique_ptr<ShaderAiProvider> provider_;
@@ -2244,6 +2366,15 @@ private:
   int previewW_ = 960, previewH_ = 540, selectedHistory_ = -1, sourceLine_ = 0, sourceTab_ = 0;
   bool playing_ = true, sourceDirty_ = false, compileQueued_ = false, imguiReady_ = false;
   bool generationInFlight_ = false;
+  // Whether the in-flight request is a repair (true) or a fresh generation
+  // (false). A fresh generation that renders a degenerate frame is
+  // auto-repaired up to providerConfig_.autoRepairMax times; a repair's own
+  // result never re-triggers another automatic ask.
+  bool generationIsRepair_ = false;
+  // Automatic repair chain counter: bumped by the auto path so the status line
+  // can show "auto-repair 1/N" and the final request count; reset to 0 when a
+  // fresh generation (or a manual repair) starts.
+  int autoRepairsUsed_ = 0;
   std::future<GeneratedShader> generationFuture_;
   bool modelRefreshInFlight_ = false;
   std::future<ModelRefreshResult> modelFuture_;

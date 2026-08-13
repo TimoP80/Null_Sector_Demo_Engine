@@ -23,6 +23,15 @@ struct ShaderCheckResult {
 /** compile every stage in the shaders dir; returns the aggregate (never throws) */
 ShaderCheckResult compileAllShaders();
 
+/** render every self-contained content .frag (procedural fullscreen effects
+ *  with no sampler uniforms - the ones the probe's standard uniform set can
+ *  judge) into an offscreen target at several instants and classify the
+ *  output via the shared RenderProbe: flags shaders that never drew, render
+ *  one uniform color, or collapsed to near-black. Pipeline-pass shaders that
+ *  depend on bound textures are skipped. Returns the aggregate (never
+ *  throws). Activated with `--check-shaders --render`. */
+ShaderCheckResult checkShadersRender();
+
 /** compile a single .vert/.frag file for the preflight; returns true on success */
 bool checkShaderFile(const std::string& file);
 

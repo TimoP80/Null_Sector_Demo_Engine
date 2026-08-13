@@ -171,7 +171,7 @@ All flags are shared by the player (`ns_demo.exe`) and the standalone editor
 |---|---|
 | `--demo=PATH` | demo script to run (default `data/demo.nsd`) |
 | `--check-production[=P]` | headless production validation (no GL): parse the `.nsd`, build the timeline, verify every scene/effect/shadertoy/model/material/preset/rig reference resolves; prints a checklist, exits 0/1 |
-| `--check-shaders` | compile every engine + app shader program, then exit |
+| `--check-shaders` | compile every engine + app shader program, then exit (with `--render`: also render every self-contained content shader offscreen and flag ones that never drew / render a solid color / go near-black) |
 | `--check-models` | 3D pipeline preflight: OBJ/GLB → lit shader → draw readback, plus shipped models/materials |
 | `--check-shadertoy` | render every `data/shadertoy/*.glsl` offscreen with pixel readback, then exit |
 | `--check-hotreload` | live-reload smoke: break + fix a temp shader, verify keep-previous + recompile |

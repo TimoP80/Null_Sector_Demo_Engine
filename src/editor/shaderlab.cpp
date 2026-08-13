@@ -1,6 +1,7 @@
 #include "editor/shaderlab.hpp"
 
 #include "engine/audio.hpp"
+#include "engine/renderprobe.hpp"
 #include "engine/timeline.hpp"
 #include "framework/core/log.hpp"
 #include "imgui.h"
@@ -381,7 +382,6 @@ bool ShaderLab::compile() {
     auto next = std::make_unique<Shader>("fullscreen.vert", previewFile_);
     program_ = std::move(next);
     compileError_.clear();
-    compileStatus_ = "Shader OK";
     lastCompiledSource_ = sourceBuf_.data();
     Log::info("SHADERLAB", "compiled typography preview");
     // Compiling validates the source but does not save it to disk. Keeping the
@@ -389,14 +389,60 @@ bool ShaderLab::compile() {
     // like a normal authoring tool.
     compileQueued_ = false;
     parseMetadata();
+    // A shader that compiles is not necessarily a shader that shows anything:
+    // catch a source that renders as one uniform color (e.g. a typography
+    // shader whose glyph mask was accidentally removed) instead of accepting
+    // it silently as a flashing solid screen.
+    runOutputProbe();
+    if (flatOutput_) {
+      compileStatus_ = "Shader OK - warning: degenerate output";
+    } else {
+      compileWarning_.clear();
+      compileStatus_ = "Shader OK";
+    }
     return true;
   } catch (const std::exception& e) {
     compileStatus_ = "Compile error";
     compileError_ = e.what();
+    compileWarning_.clear();
+    flatOutput_ = false;
     compileQueued_ = false;
     Log::error("SHADERLAB", compileError_);
     return false;
   }
+}
+
+/** Probe the compiled program through the shared engine RenderProbe (render
+ *  to a tiny offscreen target, read back at several instants, classify).
+ *  Sample times avoid t=0 so a spatial term multiplied by sin(uTime) is not
+ *  misread as flat. Mirrors render()'s texture binding (font atlas on unit 0,
+ *  fill texture via bindUniforms) so a text/fill-dependent shader is not
+ *  falsely flagged because its samplers are unbound. Sets flatOutput_ + a
+ *  human-readable compileWarning_ for any degenerate class (never drew,
+ *  uniform/ time-only, near-black). */
+void ShaderLab::runOutputProbe() {
+  flatOutput_ = false;
+  compileWarning_.clear();
+  if (!program_ || !w_.renderer) return;
+  const int W = 64, H = 64;
+  const RenderProbeResult probe = probeRender(W, H, {0.37f, 1.13f}, [&](float t) {
+    program_->use();
+    bindUniforms(t, 1.0f / 60.0f);
+    // the check target is smaller than the live preview; keep uResolution
+    // truthful so resolution-dependent terms still vary as expected
+    program_->set2f("uResolution", (float)W, (float)H);
+    const Assets* a = activeFont();
+    if (a && a->fontTex.tex) {
+      a->fontTex.bind(0);
+      program_->set1i("uText", 0);
+    }
+    w_.renderer->fsTriangle.draw(3);
+  });
+  flatOutput_ = probe.degenerate();
+  if (flatOutput_)
+    compileWarning_ =
+        "Preview check: " + probe.diagnosis() +
+        " Make the output depend on `vUV` / `uv` (not only on uTime).";
 }
 
 bool ShaderLab::ensurePreview(int width, int height) {
@@ -681,12 +727,21 @@ void ShaderLab::drawSourceEditor() {
   if (ImGui::Button("Revert compiled") && !lastCompiledSource_.empty())
     restoreSource(lastCompiledSource_, "reverted compiled source");
   ImGui::SameLine();
-  ImGui::TextColored(compileError_.empty() ? ImVec4(0.35f, 1, 0.75f, 1) : ImVec4(1, 0.35f, 0.35f, 1),
-                     "%s%s", sourceDirty_ ? "* " : "", compileStatus_.c_str());
+  // green = clean, amber = compiles but renders degenerate output, red = compile error
+  const ImVec4 statusCol = compileError_.empty()
+                               ? (flatOutput_ ? ImVec4(1.0f, 0.85f, 0.3f, 1)
+                                              : ImVec4(0.35f, 1, 0.75f, 1))
+                               : ImVec4(1, 0.35f, 0.35f, 1);
+  ImGui::TextColored(statusCol, "%s%s", sourceDirty_ ? "* " : "", compileStatus_.c_str());
   if (!compileError_.empty()) {
     ImGui::BeginChild("shaderlab_errors", ImVec2(0, 130), true);
     ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1), "Compile failed - previous valid preview is retained");
     ImGui::TextWrapped("%s", compileError_.c_str());
+    ImGui::EndChild();
+  } else if (flatOutput_) {
+    ImGui::BeginChild("shaderlab_flat_warning", ImVec2(0, 60), true);
+    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1), "Compiles, but renders degenerate output");
+    ImGui::TextWrapped("%s", compileWarning_.c_str());
     ImGui::EndChild();
   }
 }

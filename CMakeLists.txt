@@ -129,6 +129,7 @@ if(NS_BUILD_APP)
     src/engine/degraded.cpp
     src/engine/gl.cpp
     src/engine/postprocess.cpp
+    src/engine/renderprobe.cpp
     src/engine/shader.cpp
     src/engine/shadercheck.cpp
     src/engine/ubo.cpp
@@ -198,6 +199,7 @@ if(NS_BUILD_APP)
     src/shader_ai.cpp
     src/engine/audio.cpp
     src/engine/gl.cpp
+    src/engine/renderprobe.cpp
     src/engine/shader.cpp
   )
   target_include_directories(ns_shader_ai PRIVATE third_party)
