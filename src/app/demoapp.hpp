@@ -22,6 +22,7 @@
 #include "engine/renderer.hpp"
 #include "engine/timeline.hpp"
 #include "engine/ubo.hpp"
+#include "engine/video.hpp"
 #include "effects/base_fwd.hpp"
 #include "app/appassets.hpp"
 #include "app/model.hpp"
@@ -297,6 +298,11 @@ private:
 
   // per-texture handles for sprite/image nodes (acquired once, never re-bumped)
   std::map<std::string, Texture*> spriteTex_;
+  std::map<std::string, std::unique_ptr<VideoPlayer>> videoPlayers_;
+  // PackageFS assets are byte-addressable but ffmpeg consumes a filename.
+  // Temporary extracted files live only for the active scene and are removed
+  // after its decoder threads have stopped.
+  std::vector<std::string> videoTempFiles_;
 
   // Data-driven image entrance transitions. The image command is a friendly
   // texture-node alias; keeping this state in the director leaves SpriteData
@@ -343,6 +349,7 @@ private:
   void applySample(const AnimSample& s);
   void updateFade(float dt);
   void updateImageTransitions(float dt);
+  void cleanupVideoTempFiles();
   void pollLiveReload(const std::vector<std::string>& changed);
   void pushAudioUniforms(Effect* e);
 

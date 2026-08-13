@@ -60,6 +60,15 @@ public:
     return t;
   }
 
+  /** Update an existing RGBA8 texture without reallocating its storage. */
+  void updateRGBA(int width, int height, const void* data) {
+    if (!tex || width != w || height != h) return;
+    ::glBindTexture(::gl::TEXTURE_2D, tex);
+    ::glPixelStorei(::gl::UNPACK_ALIGNMENT, 1);
+    ::glTexSubImage2D(::gl::TEXTURE_2D, 0, 0, 0, width, height,
+                      ::gl::RGBA, ::gl::UNSIGNED_BYTE, data);
+  }
+
   /** 24-bit depth texture attachment (for the 3D model pass) */
   static Texture blankDepth(int w, int h) {
     Texture t;

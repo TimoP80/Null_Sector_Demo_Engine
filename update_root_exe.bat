@@ -1,0 +1,1 @@
+copy build\release\*.exe 

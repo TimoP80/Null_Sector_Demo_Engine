@@ -46,7 +46,11 @@ static std::string readScriptText(const std::string& path) {
   return text;
 }
 
-DemoApp::~DemoApp() { delete cineText_; }
+DemoApp::~DemoApp() {
+  videoPlayers_.clear();
+  cleanupVideoTempFiles();
+  delete cineText_;
+}
 
 // ---------------------------------------------------------------------------
 // init
@@ -112,7 +116,8 @@ void DemoApp::init(const Input& in) {
 
   // live reload watcher: shaders + data + assets
   watcher_.add(AppAssets::shaderDir(), {".vert", ".frag", ".glsl"});
-  watcher_.add(dataDir(), {".nsd", ".json", ".glsl", ".obj", ".glb", ".png", ".jpg", ".mtl"});
+  watcher_.add(dataDir(), {".nsd", ".json", ".glsl", ".obj", ".glb", ".png", ".jpg", ".mtl",
+                              ".mp4", ".mkv", ".webm", ".mov"});
   watcher_.add(resolveRuntimeDir("NULLSECTOR_ASSET_DIR", NULLSECTOR_ASSET_DIR, "assets"),
                {".png", ".jpg", ".ttf"});
   watcher_.poll();  // baseline
@@ -223,6 +228,7 @@ void DemoApp::update(float show, float dt) {
   // fades / transitions
   updateFade(dt);
   updateImageTransitions(dt);
+  for (auto& entry : videoPlayers_) entry.second->update();
 
   // audio uniforms for data-driven effects
   audioUniforms_.bass = in_.audio->react.bass.load();
@@ -440,7 +446,7 @@ void DemoApp::dispatch(const Cmd& cmd, float at) {
     toggleLoop();
   } else if (n == "jump") {
     if (!cmd.args.empty()) seek(cmd.args[0].asFloat(0));
-  } else if (n == "mesh" || n == "sprite" || n == "image" || n == "text" || n == "light" ||
+  } else if (n == "mesh" || n == "sprite" || n == "video" || n == "image" || n == "text" || n == "light" ||
              n == "particles" || n == "empty" || n == "postnode" || n == "quadnode") {
     cmdSceneNode(cmd);
   } else {
@@ -571,6 +577,12 @@ void DemoApp::editorHideEffect(const std::string& name) {
       editorPreviewEffects_.end());
 }
 
+void DemoApp::cleanupVideoTempFiles() {
+  std::error_code ec;
+  for (const auto& path : videoTempFiles_) std::filesystem::remove(path, ec);
+  videoTempFiles_.clear();
+}
+
 void DemoApp::activateScene(const std::string& name) {
   const SceneBundle* b = script_.scene(name);
   if (!b) return;
@@ -580,6 +592,8 @@ void DemoApp::activateScene(const std::string& name) {
     // activations made meshes, sprites and text from the previous scene stay
     // renderable after the new scene was entered.
     scene_.clear();
+    videoPlayers_.clear();
+    cleanupVideoTempFiles();
     anims_.stopAll();
     imageTransitions_.clear();
   }
@@ -627,17 +641,19 @@ const Assets* DemoApp::fontForText(const std::string& font) {
 
 void DemoApp::cmdSceneNode(const Cmd& cmd) {
   const bool imageCmd = cmd.name == "image";
+  const bool videoCmd = cmd.name == "video";
   std::string nodeName = cmd.args.empty() ? cmd.name : cmd.args[0].asStr();
   if (imageCmd && cmd.opts.get("tex").isNull() && cmd.args.size() == 1) {
     // Convenient one-argument form: `image poster.png` creates node `poster`.
     nodeName = std::filesystem::path(cmd.args[0].asStr()).stem().string();
   }
-  if ((cmd.name == "mesh" || imageCmd) && nodeName.rfind('.') != std::string::npos) {
+  if ((cmd.name == "mesh" || imageCmd || videoCmd) && nodeName.rfind('.') != std::string::npos) {
     nodeName = std::filesystem::path(nodeName).stem().string();  // file.ext -> file
   }
   NodeType type = NodeType::Empty;
   if (cmd.name == "mesh") type = NodeType::Mesh;
   else if (cmd.name == "sprite" || imageCmd) type = NodeType::Sprite;
+  else if (videoCmd) type = NodeType::Video;
   else if (cmd.name == "text") type = NodeType::Text;
   else if (cmd.name == "light") type = NodeType::Light;
   else if (cmd.name == "particles") type = NodeType::Particles;
@@ -696,12 +712,64 @@ void DemoApp::cmdSceneNode(const Cmd& cmd) {
       }
       break;
     }
+    case NodeType::Video: {
+      VideoData vd;
+      vd.file = cmd.opts.get("file").asStr(cmd.args.empty() ? "" : cmd.args[0].asStr());
+      vd.width = cmd.opts.get("width").asInt(1280);
+      vd.height = cmd.opts.get("height").asInt(720);
+      vd.fps = cmd.opts.get("fps").asFloat(30.0f);
+      const Value& loopValue = cmd.opts.get("loop");
+      vd.loop = loopValue.isStr()
+                    ? (loopValue.asStr() != "false" && loopValue.asStr() != "0")
+                    : loopValue.asBool(true);
+      vd.opacity = cmd.opts.get("opacity").asFloat(1.0f);
+      if (cmd.opts.get("size").toFloats(f, 3) == 3) vd.size = {f[0], f[1], f[2]};
+      node->payload = vd;
+      std::string path = vd.file;
+      std::error_code ec;
+      if (!std::filesystem::is_regular_file(path, ec) || ec) {
+        path = dataDir() + "/video/" + vd.file;
+      }
+      if (!std::filesystem::is_regular_file(path, ec) || ec) {
+        // A packaged production has no host path for its payload. Extract the
+        // VFS bytes to a short-lived temp file because the existing ffmpeg
+        // pipe is intentionally filename-based and shared with MP4 export.
+        const std::string vpath = vd.file.rfind("data/", 0) == 0
+                                      ? vd.file
+                                      : "data/video/" + vd.file;
+        const std::vector<uint8_t> bytes = runtimeFS().read(vpath);
+        if (!bytes.empty()) {
+          std::filesystem::path tempDir = std::filesystem::temp_directory_path(ec);
+          if (ec) tempDir = std::filesystem::current_path(ec);
+          const std::string ext = std::filesystem::path(vd.file).extension().string().empty()
+                                      ? ".mp4" : std::filesystem::path(vd.file).extension().string();
+          const std::string tempName = "ns_video_" +
+              std::to_string((unsigned long long)std::hash<std::string>{}(vpath)) + ext;
+          const std::filesystem::path tempPath = tempDir / tempName;
+          std::ofstream out(tempPath, std::ios::binary | std::ios::trunc);
+          if (out) {
+            out.write(reinterpret_cast<const char*>(bytes.data()),
+                      (std::streamsize)bytes.size());
+            out.close();
+            path = tempPath.string();
+            videoTempFiles_.push_back(path);
+          }
+        }
+      }
+      auto player = std::make_unique<VideoPlayer>();
+      if (player->open(path, vd.width, vd.height, vd.fps, vd.loop))
+        videoPlayers_[nodeName] = std::move(player);
+      else
+        videoPlayers_.erase(nodeName);
+      break;
+    }
     case NodeType::Text: {
       TextData td;
       td.text = cmd.opts.get("text").asStr(cmd.args.empty() ? "" : cmd.args[0].asStr());
       td.sizePx = cmd.opts.get("size").asInt(24);
       td.font = cmd.opts.get("font").asStr();
       td.style = cmd.opts.get("style").asStr("neon");
+      td.align = cmd.opts.get("align").asFloat(-1.0f);
       if (cmd.opts.get("color").toFloats(f, 4) == 4) td.color = {f[0], f[1], f[2], f[3]};
       td.opacity = cmd.opts.get("opacity").asFloat(1);
       node->payload = td;
@@ -967,6 +1035,8 @@ void DemoApp::reloadScript() {
     clearEditorPreviewEffects();
     activeEffects_.clear();
     scene_.clear();
+    videoPlayers_.clear();
+    cleanupVideoTempFiles();
     anims_.stopAll();
     imageTransitions_.clear();
     catchUpFloor_ = -1e9f;
@@ -1314,8 +1384,10 @@ void DemoApp::renderMeshLayer() {
 }
 
 void DemoApp::renderSpritesAndText() {
-  const auto sprites = scene_.nodesOf(NodeType::Sprite, true);
-  if (!sprites.empty()) {
+  std::vector<SceneNode*> textured = scene_.nodesOf(NodeType::Sprite, true);
+  const auto videos = scene_.nodesOf(NodeType::Video, true);
+  textured.insert(textured.end(), videos.begin(), videos.end());
+  if (!textured.empty()) {
     if (!spriteQuadBuilt_) {
       const float p[12] = {-0.5f, -0.5f, 0.5f, -0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f};
       const float u[12] = {0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1};
@@ -1327,25 +1399,36 @@ void DemoApp::renderSpritesAndText() {
     ::glBlendFunc(::gl::SRC_ALPHA, ::gl::ONE_MINUS_SRC_ALPHA);
     ::glDisable(::gl::DEPTH_TEST);
     spriteProg_.use();
-    for (SceneNode* n : sprites) {
-      SpriteData* sd = n->asSprite();
+    for (SceneNode* n : textured) {
       Texture* tex = nullptr;
-      if (!sd->tex.empty()) {
-        // acquire once per texture path (refcounted by the asset manager);
-        // cached so the per-frame draw never bumps the refcount
-        auto it = spriteTex_.find(sd->tex);
-        if (it != spriteTex_.end()) {
-          tex = it->second;
-        } else {
-          void* h = assets_.acquire("data/textures/" + sd->tex, "texture");
-          tex = static_cast<Texture*>(h);
-          spriteTex_[sd->tex] = tex;
+      std::array<float, 4> color{1, 1, 1, 1};
+      float opacity = 1.0f;
+      V3 size{1, 1, 1};
+      if (n->type == NodeType::Video) {
+        auto it = videoPlayers_.find(n->name);
+        if (it != videoPlayers_.end()) tex = it->second->texture();
+        if (const VideoData* vd = n->asVideo()) { opacity = vd->opacity; size = vd->size; }
+      } else if (SpriteData* sd = n->asSprite()) {
+        color = sd->color;
+        opacity = sd->opacity;
+        size = sd->size;
+        if (!sd->tex.empty()) {
+          // acquire once per texture path (refcounted by the asset manager);
+          // cached so the per-frame draw never bumps the refcount
+          auto it = spriteTex_.find(sd->tex);
+          if (it != spriteTex_.end()) {
+            tex = it->second;
+          } else {
+            void* h = assets_.acquire("data/textures/" + sd->tex, "texture");
+            tex = static_cast<Texture*>(h);
+            spriteTex_[sd->tex] = tex;
+          }
         }
       }
       // world * size
       Mat4 out{};
       const Mat4& m = n->world;
-      const float sx = sd->size[0], sy = sd->size[1], sz = sd->size[2];
+      const float sx = size[0], sy = size[1], sz = size[2];
       for (int c = 0; c < 4; c++) {
         out[c * 4 + 0] = m[c * 4 + 0] * sx;
         out[c * 4 + 1] = m[c * 4 + 1] * sy;
@@ -1386,8 +1469,8 @@ void DemoApp::renderSpritesAndText() {
         ::glBindTexture(::gl::TEXTURE_2D, tex->tex);
       }
       spriteProg_.set1i("uTex", 0);
-      spriteProg_.set4f("uColor", sd->color[0], sd->color[1], sd->color[2], sd->color[3]);
-      spriteProg_.set1f("uOpacity", sd->opacity * transitionAlpha);
+      spriteProg_.set4f("uColor", color[0], color[1], color[2], color[3]);
+      spriteProg_.set1f("uOpacity", opacity * transitionAlpha);
       spriteQuad_.draw(6);
     }
     ::glDisable(::gl::BLEND);
@@ -1407,7 +1490,7 @@ void DemoApp::renderSpritesAndText() {
     else if (td->style == "outline") style = CineStyle::Outline;
     const Assets* textFont = fontForText(td->font);
     cineText_->line(ctx_, td->text, n->pos[1], td->sizePx, style, td->opacity, 0, 0.5f, 1.0f, 0,
-                    n->pos[0] * 0.5f, textFont);
+                    n->pos[0] * 0.5f, textFont, td->align);
   }
 }
 

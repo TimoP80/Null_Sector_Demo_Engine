@@ -82,6 +82,7 @@ void ShaderLab::init(const Wiring& wiring) {
   scanTextures();
   rebuildSourceFromPreset();
   compile();
+  std::snprintf(saveNameBuf_, sizeof(saveNameBuf_), "%s", shaderName().c_str());
 }
 
 void ShaderLab::shutdown() {
@@ -347,6 +348,7 @@ void ShaderLab::parseMetadata() {
     if (x.type == "float" || x.type == "int") {
       ls >> x.min >> x.max >> x.value;
       if (x.max <= x.min) x.max = x.min + 1;
+      x.defaultValue = x.value;
     } else if (x.type == "color") {
       std::string hex; ls >> hex;
       if (hex.size() == 7 && hex[0] == '#') {
@@ -355,6 +357,7 @@ void ShaderLab::parseMetadata() {
         x.color[1] = (h(hex[3]) * 16 + h(hex[4])) / 255.0f;
         x.color[2] = (h(hex[5]) * 16 + h(hex[6])) / 255.0f;
         x.color[3] = 1;
+        for (int i = 0; i < 4; ++i) x.defaultColor[i] = x.color[i];
       }
     } else continue;
     params_.push_back(x);
@@ -379,8 +382,11 @@ bool ShaderLab::compile() {
     program_ = std::move(next);
     compileError_.clear();
     compileStatus_ = "Shader OK";
+    lastCompiledSource_ = sourceBuf_.data();
     Log::info("SHADERLAB", "compiled typography preview");
-    sourceDirty_ = false;
+    // Compiling validates the source but does not save it to disk. Keeping the
+    // dirty flag here makes accidental loss visible and lets Save/Revert work
+    // like a normal authoring tool.
     compileQueued_ = false;
     parseMetadata();
     return true;
@@ -483,14 +489,32 @@ void ShaderLab::markEdited() {
 
 bool ShaderLab::saveAsset() {
   if (!initialized_ || sourceBuf_.empty()) return false;
-  const std::string path = w_.shaderDir + "/" + shaderName() + ".frag";
+  const std::string clean = sanitizeName(saveNameBuf_);
+  const std::string path = w_.shaderDir + "/" + clean + ".frag";
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) return false;
   out.write(sourceBuf_.data(), (std::streamsize)std::strlen(sourceBuf_.data()));
   out.close();
   exportedPath_ = path;
-  compileStatus_ = "Exported " + std::filesystem::path(path).filename().string();
+  savedSource_ = sourceBuf_.data();
+  sourceDirty_ = false;
+  compileStatus_ = "Saved " + std::filesystem::path(path).filename().string();
   return true;
+}
+
+void ShaderLab::restoreSource(const std::string& source, const char* status) {
+  if (source.empty()) return;
+  sourceBuf_.assign(source.begin(), source.end());
+  sourceBuf_.push_back(0);
+  sourceBuf_.resize(kSourceCap + 1, 0);
+  selectedPreset_ = "Custom";
+  presetIndex_ = -1;
+  parseMetadata();
+  sourceDirty_ = true;
+  compileQueued_ = true;
+  lastEdit_ = wallNowLab();
+  compileStatus_ = status ? status : "restored";
+  compileError_.clear();
 }
 
 std::string ShaderLab::selectedTexturePath() const {
@@ -543,6 +567,11 @@ bool ShaderLab::takeInsertRequest() {
   const bool v = insertRequest_;
   insertRequest_ = false;
   return v;
+}
+
+bool ShaderLab::saveCurrentAsset() {
+  if (!initialized_) return false;
+  return saveAsset();
 }
 
 void ShaderLab::drawTextControls() {
@@ -605,33 +634,58 @@ void ShaderLab::drawParameterControls() {
     else ImGui::SliderFloat(p.name.c_str(), &p.value, p.min, p.max);
     ImGui::PopID();
   }
+  if (ImGui::Button("Reset parameters")) {
+    for (Param& p : params_) {
+      p.value = p.defaultValue;
+      for (int i = 0; i < 4; ++i) p.color[i] = p.defaultColor[i];
+    }
+  }
 }
 
 void ShaderLab::drawSourceEditor() {
   ImGui::SeparatorText("GLSL source");
   ImGui::TextDisabled("Built-ins: uResolution uTime uBPM uBeat uBar uBass uMid uTreble uKick uText");
+  const std::string source = sourceBuf_.empty() ? std::string() : sourceBuf_.data();
+  const int lineCount = std::max(1, (int)splitLines(source).size());
+  ImGui::BeginChild("shaderlab_source_editor", ImVec2(0, 330), true);
+  ImGui::BeginChild("shaderlab_line_numbers", ImVec2(42, 0), true,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+  for (int line = 1; line <= lineCount; ++line) ImGui::TextDisabled("%4d", line);
+  ImGui::EndChild();
+  ImGui::SameLine();
+  ImGui::BeginChild("shaderlab_source_text", ImVec2(0, 0), false);
   if (ImGui::InputTextMultiline("##shaderlab_source", sourceBuf_.data(), sourceBuf_.size(),
-                                ImVec2(-1, 330), ImGuiInputTextFlags_AllowTabInput)) {
+                                ImVec2(-1, -1), ImGuiInputTextFlags_AllowTabInput)) {
     selectedPreset_ = "Custom";
     presetIndex_ = -1;
     markEdited();
     parseMetadata();
   }
+  ImGui::EndChild();
+  ImGui::EndChild();
+
+  ImGui::SetNextItemWidth(220);
+  ImGui::InputTextWithHint("##shaderlab_save_name", "shader asset name", saveNameBuf_,
+                          sizeof(saveNameBuf_));
+  ImGui::SameLine();
   if (ImGui::Button("Compile")) compile();
   ImGui::SameLine();
-  if (ImGui::Button("Save Shader Asset")) {
-    if (saveAsset()) compileStatus_ = "Saved " + std::filesystem::path(exportedPath_).filename().string();
-  }
+  if (ImGui::Button("Save Shader Asset")) saveAsset();
   ImGui::SameLine();
-  if (ImGui::Button("Insert into Timeline")) {
-    if (exportedPath_.empty()) saveAsset();
-    if (!exportedPath_.empty()) insertRequest_ = true;
-  }
+  if (ImGui::Button("Save As")) saveAsset();
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Save using the asset name field");
+  ImGui::SameLine();
+  if (ImGui::Button("Revert saved") && !savedSource_.empty())
+    restoreSource(savedSource_, "reverted saved source");
+  ImGui::SameLine();
+  if (ImGui::Button("Revert compiled") && !lastCompiledSource_.empty())
+    restoreSource(lastCompiledSource_, "reverted compiled source");
   ImGui::SameLine();
   ImGui::TextColored(compileError_.empty() ? ImVec4(0.35f, 1, 0.75f, 1) : ImVec4(1, 0.35f, 0.35f, 1),
-                     "%s", compileStatus_.c_str());
+                     "%s%s", sourceDirty_ ? "* " : "", compileStatus_.c_str());
   if (!compileError_.empty()) {
     ImGui::BeginChild("shaderlab_errors", ImVec2(0, 130), true);
+    ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1), "Compile failed - previous valid preview is retained");
     ImGui::TextWrapped("%s", compileError_.c_str());
     ImGui::EndChild();
   }
@@ -659,6 +713,9 @@ void ShaderLab::draw(float time) {
   }
   if (ImGui::BeginMenuBar()) {
     ImGui::TextDisabled("DEMO EFFECT LABORATORY");
+    ImGui::SameLine();
+    ImGui::Text("%s%s", selectedPreset_.c_str(), sourceDirty_ ? " *" : "");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Current shader source");
     ImGui::EndMenuBar();
   }
   ImGui::BeginChild("shaderlab_left", ImVec2(290, 0), true);

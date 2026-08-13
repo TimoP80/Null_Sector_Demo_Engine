@@ -22,6 +22,7 @@
 #include "framework/vfs/packagefs.hpp"
 #include "framework/vfs/vfs.hpp"
 #include "app/shadertoyparse.hpp"
+#include "shadertoy_convert.hpp"
 #include "engine/gputimer.hpp"
 
 #include <algorithm>
@@ -200,6 +201,23 @@ scene Gallery {
     CHECK(image.scenes[0].setup[0].s("transition") == "fade", "image transition option");
     CHECK_NEAR(image.scenes[0].setup[0].f("duration"), 0.75f, 1e-6f, "image transition duration");
     CHECK(image.scenes[0].blocks[0].cmds[0].args[0].asStr() == "logo.png", "one-argument image form");
+  }
+
+  // video nodes use the same command grammar as image/sprite nodes and keep
+  // decoder settings in the AST for data-driven playback.
+  {
+    const Script video = ScriptParser::parse(R"(
+scene Trailer {
+    video intro.mp4 { width 640; height 360; fps 24; loop false; opacity 0.8; size (2,1.125,1) }
+}
+)", "video");
+    CHECK(video.scenes[0].setup.size() == 1, "video command parses in scene setup");
+    CHECK(video.scenes[0].setup[0].name == "video", "video command name");
+    CHECK(video.scenes[0].setup[0].args[0].asStr() == "intro.mp4", "video file arg");
+    CHECK(video.scenes[0].setup[0].i("width") == 640, "video width option");
+    CHECK(video.scenes[0].setup[0].i("height") == 360, "video height option");
+    CHECK_NEAR(video.scenes[0].setup[0].f("fps"), 24.0f, 1e-6f, "video fps option");
+    CHECK(video.scenes[0].setup[0].s("loop") == "false", "video loop option");
   }
 
   // errors
@@ -528,6 +546,14 @@ static void testSceneGraph() {
   // node types
   SceneNode* l = g.addNode("key", NodeType::Light, LightData{"point", {1, 0, 0}, 3.0f, 10, 45, false});
   CHECK(l->asLight() != nullptr, "light payload accessor");
+  VideoData vd;
+  vd.file = "intro.mp4";
+  vd.width = 640;
+  vd.height = 360;
+  vd.fps = 24.0f;
+  vd.loop = false;
+  SceneNode* video = g.addNode("trailer", NodeType::Video, vd);
+  CHECK(video->asVideo() && video->asVideo()->file == "intro.mp4", "video payload accessor");
   CHECK(l->asCamera() == nullptr, "wrong accessor returns null");
   CHECK(l->asLight()->intensity == 3.0f, "light intensity");
 
@@ -540,6 +566,10 @@ static void testSceneGraph() {
   CHECK(c2->type == NodeType::Sprite, "scene json round trip type");
   SceneNode* l2 = g2.find("key");
   CHECK(l2->asLight() && l2->asLight()->color[0] == 1.0f, "scene json round trip payload");
+  SceneNode* video2 = g2.find("trailer");
+  CHECK(video2 && video2->type == NodeType::Video, "video json round trip type");
+  CHECK(video2 && video2->asVideo() && video2->asVideo()->width == 640 &&
+            video2->asVideo()->loop == false, "video json round trip payload");
   g2.update();
   CHECK_NEAR(c2->world[12], 9.0f, 1e-3f, "restored world matrix");
 }
@@ -2304,6 +2334,214 @@ static void testFlipRowsInPlace() {
   CHECK(img3[0] == 9, "flip: zero size no-op");
 }
 
+// testShadertoyConvert - the GL-free Shadertoy -> single fragment shader
+// converter. A single-pass shader must become a plain Null Sector fragment
+// shader (uniform shims + mainImage -> main), and a multi-pass file must fold
+// every channel into the one file: buffers become callable functions, texture
+// channels stay sampler2D uniforms, audio/keyboard are stubbed.
+static void testShadertoyConvert() {
+  // --- single pass: uniforms remapped, mainImage wrapped by main()
+  {
+    const std::string src =
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+        "    vec2 uv = fragCoord / iResolution.xy;\n"
+        "    float t = iTime;\n"
+        "    vec3 col = texture(iChannel0, uv).rgb;\n"
+        "    fragColor = vec4(col, 1.0);\n"
+        "}\n";
+    const auto r = convertShadertoyToFragment(src, {});
+    CHECK(r.ok, "stConvert: single pass converts");
+    CHECK(r.ok && r.fragment.find("#define iResolution vec3(uResolution, 1.0)") != std::string::npos,
+          "stConvert: iResolution shim");
+    CHECK(r.ok && r.fragment.find("#define iTime uTime") != std::string::npos, "stConvert: iTime shim");
+    CHECK(r.ok && r.fragment.find("void main() {") != std::string::npos, "stConvert: main() wrapper");
+    CHECK(r.ok && r.fragment.find("mainImage(fragColor, fragCoord);") != std::string::npos,
+          "stConvert: main calls mainImage");
+    // iChannel0 with no buffers -> kept as a sampler, not folded
+    CHECK(r.ok && r.fragment.find("uniform sampler2D uChannel0;") != std::string::npos,
+          "stConvert: texture channel kept as sampler");
+    CHECK(r.ok && r.fragment.find("texture(uChannel0, uv)") != std::string::npos,
+          "stConvert: iChannel0 rewritten to uChannel0");
+    CHECK(r.ok && r.fragment.find("iTime") == std::string::npos ||
+              r.fragment.find("#define iTime uTime") != std::string::npos,
+          "stConvert: no bare iTime survives");
+  }
+
+  // --- multi pass: buffer_a folded into a callable function, the image
+  //     pass's texture(iChannel0, uv) rewritten to call it
+  {
+    const std::string src =
+        "// pass: common\n"
+        "float hash21(vec2 p) { return fract(p.x * 12.9898); }\n"
+        "\n"
+        "// pass: buffer_a\n"
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+        "    vec2 uv = fragCoord / iResolution.xy;\n"
+        "    fragColor = vec4(hash21(uv), 0.0, 0.0, 1.0);\n"
+        "}\n"
+        "\n"
+        "// pass: image\n"
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+        "    vec2 uv = fragCoord / iResolution.xy;\n"
+        "    vec4 col = texture(iChannel0, uv);\n"
+        "    fragColor = col;\n"
+        "}\n";
+    const auto r = convertShadertoyToFragment(src, {});
+    CHECK(r.ok, "stConvert: multi pass converts");
+    CHECK(r.ok && !r.foldedBuffers.empty(), "stConvert: buffer folded");
+    CHECK(r.ok && r.fragment.find("vec4 st_buffer_a(vec2 fragCoord)") != std::string::npos,
+          "stConvert: buffer wrapper function emitted");
+    CHECK(r.ok && r.fragment.find("st_buffer_a(uv * iResolution.xy)") != std::string::npos,
+          "stConvert: image samples the folded buffer by uv");
+    CHECK(r.ok && r.fragment.find("st_buffer_a_mainImage") != std::string::npos,
+          "stConvert: buffer mainImage renamed uniquely");
+    // common helpers emitted once at the top
+    CHECK(r.ok && r.fragment.find("float hash21(vec2 p)") != std::string::npos,
+          "stConvert: common helpers kept");
+  }
+
+  // --- helper name collisions across passes must be renamed (both passes
+  //     define hash21 - the fold cannot emit two definitions of the same name)
+  {
+    const std::string src =
+        "// pass: buffer_a\n"
+        "float hash21(vec2 p) { return fract(p.x); }\n"
+        "void mainImage(out vec4 o, in vec2 p) { o = vec4(hash21(p)); }\n"
+        "\n"
+        "// pass: image\n"
+        "float hash21(vec2 p) { return fract(p.y); }\n"
+        "void mainImage(out vec4 o, in vec2 p) { o = vec4(hash21(p)); }\n";
+    const auto r = convertShadertoyToFragment(src, {});
+    CHECK(r.ok, "stConvert: colliding helpers still convert");
+    // image-pass helper keeps its bare name; buffer helper is prefixed.
+    // The bare name is NOT a substring of the prefixed one here so we can
+    // distinguish with a known-definition context.
+    CHECK(r.ok && r.fragment.find("float hash21(vec2 p) { return fract(p.y); }") != std::string::npos,
+          "stConvert: image-pass helper keeps its original name");
+    CHECK(r.ok && r.fragment.find("float st_buffer_a_hash21(vec2 p)") != std::string::npos,
+          "stConvert: buffer helper renamed with pass prefix");
+  }
+
+  // --- explicit channel wiring comments: a texture channel stays a sampler,
+  //     an audio channel becomes vec4(0.0), a buffer channel folds
+  {
+    const std::string src =
+        "// pass: buffer_a\n"
+        "void mainImage(out vec4 o, in vec2 p) { o = vec4(1.0); }\n"
+        "\n"
+        "// pass: image\n"
+        "// channel: iChannel0 = buffer_a\n"
+        "// channel: iChannel1 = texture:data/textures/noise.png\n"
+        "// channel: iChannel2 = audio\n"
+        "void mainImage(out vec4 o, in vec2 p) {\n"
+        "    vec2 uv = p / iResolution.xy;\n"
+        "    vec4 a = texture(iChannel0, uv);\n"
+        "    vec4 b = texture(iChannel1, uv);\n"
+        "    vec4 c = texture(iChannel2, uv);\n"
+        "    o = a + b + c;\n"
+        "}\n";
+    const auto r = convertShadertoyToFragment(src, {});
+    CHECK(r.ok, "stConvert: explicit wiring converts");
+    CHECK(r.ok && r.fragment.find("st_buffer_a(uv * iResolution.xy)") != std::string::npos,
+          "stConvert: explicit buffer wiring folds");
+    CHECK(r.ok && r.fragment.find("texture(uChannel1, uv)") != std::string::npos,
+          "stConvert: explicit texture wiring keeps sampler");
+    CHECK(r.ok && r.fragment.find("vec4(0.0)") != std::string::npos, "stConvert: audio stubbed");
+    bool hasAudioNote = false;
+    for (const auto& n : r.notes) if (n.find("audio") != std::string::npos) hasAudioNote = true;
+    CHECK(hasAudioNote, "stConvert: audio channel noted");
+  }
+
+  // --- standard Shadertoy exports use `#iChannelN "spec"` lines (not the
+  //     engine's `// channel:` comments): every one of them must wire, the
+  //     resource lines must be stripped from the output, and texture specs
+  //     must land in the bind notes so callers can fetch/bind them
+  {
+    const std::string src =
+        "#iChannel0 \"https://www.shadertoy.com/media/a/abc123.png\"\n"
+        "#iChannel1 \"textures/noise.png\"\n"
+        "#iChannel2 \"keyboard\"\n"
+        "void mainImage(out vec4 o, in vec2 p) {\n"
+        "    vec2 uv = p / iResolution.xy;\n"
+        "    o = texture(iChannel0, uv) + texture(iChannel1, uv) + texture(iChannel2, uv);\n"
+        "}\n";
+    const auto r = convertShadertoyToFragment(src, {});
+    CHECK(r.ok, "stConvert: #iChannel lines parse");
+    CHECK(r.ok && r.fragment.find("uniform sampler2D uChannel0;") != std::string::npos,
+          "stConvert: #iChannel0 URL becomes uChannel0 sampler");
+    CHECK(r.ok && r.fragment.find("uniform sampler2D uChannel1;") != std::string::npos,
+          "stConvert: #iChannel1 name becomes uChannel1 sampler");
+    CHECK(r.ok && r.fragment.find("vec4(0.0)") != std::string::npos,
+          "stConvert: #iChannel keyboard stubbed");
+    CHECK(r.ok && r.fragment.find("#iChannel") == std::string::npos,
+          "stConvert: #iChannel resource lines stripped");
+    bool urlNoted = false;
+    for (const auto& t : r.requiredTextures) if (t.find("https://") != std::string::npos) urlNoted = true;
+    CHECK(urlNoted, "stConvert: texture URL listed as a bind note");
+  }
+
+  // --- Shadertoy code samples iChannelN without any channel comment (the
+  //     resources live in the Shadertoy editor UI): a sampled-but-unwired
+  //     channel stays a bindable sampler instead of reading black
+  {
+    const std::string src =
+        "void mainImage(out vec4 o, in vec2 p) {\n"
+        "    vec2 uv = p / iResolution.xy;\n"
+        "    o = texture(iChannel2, uv);\n"
+        "}\n";
+    const auto r = convertShadertoyToFragment(src, {});
+    CHECK(r.ok, "stConvert: unwired sampled channel converts");
+    CHECK(r.ok && r.fragment.find("uniform sampler2D uChannel2;") != std::string::npos,
+          "stConvert: sampled iChannel2 inferred as sampler");
+    CHECK(r.ok && r.fragment.find("texture(uChannel2, uv)") != std::string::npos,
+          "stConvert: inferred channel rewritten");
+  }
+
+  // --- JSON API export with per-pass `inputs`: texture, buffer and keyboard
+  //     channels map onto the same wiring the GLSL path uses
+  {
+    const std::string jsonSrc =
+        "{\"Shader\":{\"renderpass\":["
+        "{\"id\":\"sA\",\"name\":\"Buffer A\",\"type\":\"buffer\",\"inputs\":["
+        "{\"id\":0,\"src\":\"https://www.shadertoy.com/media/a/tex.png\",\"ctype\":\"texture\",\"channel\":0}]"
+        ",\"code\":\"void mainImage(out vec4 o, in vec2 p){vec2 uv=p/iResolution.xy;o=texture(iChannel0,uv);}\"},"
+        "{\"id\":\"sB\",\"name\":\"Image\",\"type\":\"image\",\"inputs\":["
+        "{\"id\":0,\"src\":\"Buffer A\",\"ctype\":\"buffer\",\"channel\":0},"
+        "{\"id\":1,\"src\":\"/presets/tex01.jpg\",\"ctype\":\"texture\",\"channel\":1},"
+        "{\"id\":2,\"src\":\"\",\"ctype\":\"keyboard\",\"channel\":2}]"
+        ",\"code\":\"void mainImage(out vec4 o, in vec2 p){vec2 uv=p/iResolution.xy;o=texture(iChannel0,uv)+texture(iChannel1,uv)+texture(iChannel2,uv);}\"}"
+        "]}}";
+    const auto r = convertShadertoyToFragment(jsonSrc, {});
+    CHECK(r.ok, "stConvert: JSON export with inputs converts");
+    CHECK(r.ok && r.fragment.find("st_buffer_a(uv * iResolution.xy)") != std::string::npos,
+          "stConvert: JSON buffer input folds");
+    CHECK(r.ok && r.fragment.find("uniform sampler2D uChannel1;") != std::string::npos,
+          "stConvert: JSON texture input becomes sampler");
+    CHECK(r.ok && r.fragment.find("vec4(0.0)") != std::string::npos,
+          "stConvert: JSON keyboard input stubbed");
+  }
+
+  // --- the real shipped files convert cleanly
+  {
+    const std::string dir = NULLSECTOR_DATA_DIR;
+    for (const char* file : {"plasma.glsl", "tunnel_warp.glsl"}) {
+      std::ifstream f(dir + "/shadertoy/" + file);
+      const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+      const auto r = convertShadertoyToFragment(s, {});
+      CHECK(r.ok, (std::string("stConvert: shipped ") + file + " converts").c_str());
+      CHECK(r.ok && r.fragment.find("void main() {") != std::string::npos,
+            (std::string("stConvert: shipped ") + file + " has main()").c_str());
+    }
+    // tunnel_warp has a buffer pass: it must be folded (not left as a sampler)
+    std::ifstream f(dir + "/shadertoy/tunnel_warp.glsl");
+    const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const auto r = convertShadertoyToFragment(s, {});
+    CHECK(r.ok && !r.foldedBuffers.empty(), "stConvert: tunnel_warp folds buffer_a");
+    CHECK(r.ok && r.fragment.find("st_buffer_a(") != std::string::npos,
+          "stConvert: tunnel_warp calls the folded buffer");
+  }
+}
+
 // testFfmpegCaptureCmd - the shared ffmpeg command builder used by both
 // the CLI --export-mp4 path and the editor's File > Export MP4... action.
 static void testFfmpegCaptureCmd() {
@@ -2356,6 +2594,7 @@ static void runAll() {
   ns::testEditorDocument();
   ns::testFfmpegCaptureCmd();
   ns::testFlipRowsInPlace();
+  ns::testShadertoyConvert();
 }
 
 int main() {

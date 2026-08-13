@@ -122,6 +122,10 @@ public:
    *  show runs silent (the wall-clock fallback keeps the clock moving) */
   void start();
 
+  /** Pause/resume the audio stream and show clock without losing the playhead. */
+  void setPlaying(bool playing);
+  bool isPlaying() const { return started && !paused_; }
+
   /** seconds since playback started (the show clock) */
   float now() const;
 
@@ -228,6 +232,7 @@ private:
   double lastWall_ = 0;      // wall clock of the last update() (wall-clock fallback only)
   ma_device* device_ = nullptr;   // live miniaudio playback device (opened at start)
   bool deviceLive_ = false;       // device streaming; update() becomes a no-op
+  bool paused_ = false;            // explicit UI pause; freezes device and clock
   double lastCursor_ = 0;         // stall-guard: last frameCursor_ seen on the main thread
   int stallFrames_ = 0;           // stall-guard: consecutive frames with no clock advance
 

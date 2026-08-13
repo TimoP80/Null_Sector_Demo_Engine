@@ -125,6 +125,31 @@ static void tlFitApply(float dur, float& zoom, float& t0, float& fitZoom,
   }
 }
 
+/** ScriptEngine names top-level timeline blocks as at:<index>:<milliseconds>.
+ * Keep the parser local to the editor so delete/duplicate only touch commands
+ * that have a stable, lossless mapping back to EditorDocument::ast.main. */
+static bool topLevelTimelineIndex(const std::string& name, int& index) {
+  if (name.rfind("at:", 0) != 0) return false;
+  const size_t begin = 3;
+  const size_t end = name.find(':', begin);
+  if (end == std::string::npos || end == begin) return false;
+  try {
+    size_t used = 0;
+    index = std::stoi(name.substr(begin, end - begin), &used);
+    return used == end - begin && index >= 0;
+  } catch (...) {
+    return false;
+  }
+}
+
+static Value cameraVecValue(const V3& v) {
+  Value::Array a;
+  a.push_back(Value((double)v[0]));
+  a.push_back(Value((double)v[1]));
+  a.push_back(Value((double)v[2]));
+  return Value(std::move(a));
+}
+
 // OS-level drag-in: GLFW drop callbacks carry no user data, so the active
 // editor registers itself here (constructor) and forwards drops into its
 // per-frame queue. Only one editor exists at a time.
@@ -175,6 +200,8 @@ static const ImU32 kLine = c32(29, 38, 52);
 // helpers below inspectScene; the viewport needs the position patch before
 // that section is compiled.
 namespace {
+bool patchDocumentText(EditorDocument& doc, const std::string& sceneName,
+                       const std::string& nodeName, const std::string& text);
 bool patchDocumentTextPosition(EditorDocument& doc, const std::string& sceneName,
                                const std::string& nodeName, const V3& pos);
 }
@@ -214,6 +241,7 @@ static constexpr NsdCommandInfo kNsdCommands[] = {
     {"jump", "jump SECONDS", "Seek the show transport.", "jump 0"},
     {"mesh", "mesh NAME { model ... }", "Create a reusable 3D model node.", "mesh terrain { model terrain.obj; pos (0,0,0); meshScale 1 }"},
     {"sprite", "sprite NAME { tex ... }", "Create a textured sprite node.", "sprite logo { tex ghost_logo.png; pos (0,0,0); size (2,1,1) }"},
+    {"video", "video FILE { ... }", "Play a realtime ffmpeg-backed video texture.", "video intro.mp4 { size (2,1.125,1); width 1280; height 720; fps 30; loop true }"},
     {"image", "image FILE { transition ... }", "Create an image node with an entrance transition.", "image poster.png { transition fade; duration 1 }"},
     {"text", "text NAME { text ... }", "Create a bitmap-font text node.", "text caption { text \"HELLO WORLD\"; pos (0,0.2,0); size 32; style neon }"},
     {"light", "light NAME { ... }", "Create a point, directional, or spot light.", "light Key { type point; pos (0,2,1); color (1,0.8,0.6,1); intensity 2 }"},
@@ -663,6 +691,7 @@ bool DemoEditor::frame() {
   if (w_.app) w_.app->update(w_.director ? w_.director->show : 0, dt);
   if (w_.camera) w_.camera->update(dt);
   if (flyActive_) applyFlyCamera(dt);  // editor fly cam overrides the show camera
+  else if (viewportFocusLock_) applyViewportFocus();
   if (w_.app) w_.app->render();
   if (export_.running()) {
     // one captured frame per show-clock crossing of the capture rate (a
@@ -703,6 +732,13 @@ bool DemoEditor::frame() {
       textNodeDragging_ = false;
       textDragNodeKey_.clear();
       textDragMoved_ = false;
+    }
+    if (textViewportEditing_) {
+      doc_.cancelEdit();
+      textViewportEditing_ = false;
+      textViewportChanged_ = false;
+      textViewportEditNode_.clear();
+      textEditNodeKey_.clear();
     }
     selNode_ = nullptr;
     selEffect_.clear();
@@ -797,6 +833,15 @@ bool DemoEditor::frame() {
   }
   drawBrowse();
   drawScratch();
+
+  // Timeline input is handled by the ImGui panels after the normal engine
+  // update/render pass above. A seek queues the timeline catch-up commands,
+  // but without this second, zero-delta pass those commands would not be
+  // dispatched until the next editor frame and the captured viewport would
+  // visibly lag behind the playhead. Refresh once after all panels have
+  // handled input; repeated seek calls during a drag are coalesced.
+  refreshSeekPreview();
+
   // persist every browser's scan root + last pick when the popup closes (any
   // close path: Open, double-click, Cancel or ESC), so reopening a picker
   // lands where the user was
@@ -1007,7 +1052,7 @@ bool DemoEditor::frame() {
       bool ok = false, loaded = false, asyncOk = false, toSilent = false, bogus = false;
       bool envOk = false, saved = false, restored = false, kicksOk = false, offOk = false;
       bool quantOk = false, specOk = false, browseOk = false, liveOk = false, multiOk = false;
-      bool durOk = false;
+      bool durOk = false, timelineDurationOk = false;
       bool relOk = false, pickOk = true, panelOk = false;
       float dur = 0;
       std::error_code ec;
@@ -1031,6 +1076,9 @@ bool DemoEditor::frame() {
                   w_.audio->trackMode;
         loaded = w_.audio->swapTrack(wav, 0) && w_.audio->trackMode;
         dur = w_.audio->trackDuration;
+        timelineDurationOk =
+            std::fabs(timelineContentDuration() -
+                      std::max(w_.app ? w_.app->editor().duration : 0.0f, dur)) < 0.05f;
         rebuildAudioEnvelope();  // the waveform strip's data path
         envOk = !audioEnv_.empty() &&
                 *std::max_element(audioEnv_.begin(), audioEnv_.end()) > 0.1f;
@@ -1785,7 +1833,7 @@ bool DemoEditor::frame() {
         quantize_ = false;  // clean up so the bogus-path check is unaffected
         bogus = !w_.audio->swapTrack("nonexistent_audio_smoke.wav", 0);
         durOk = std::fabs(dur - 1.0f) < 0.05f;
-        ok = loaded && asyncOk && durOk && envOk &&
+        ok = loaded && asyncOk && durOk && timelineDurationOk && envOk &&
              kicksOk && saved && offOk && quantOk && specOk && browseOk &&
              liveOk && multiOk && relOk && pickOk && toSilent && restored && bogus;
       }
@@ -1802,13 +1850,13 @@ bool DemoEditor::frame() {
                   " + bogus guard - PASS");
       } else {
         char sb[260];
-        std::snprintf(sb, sizeof sb,                      " audio smoke: FAIL (ok=%d loaded=%d async=%d dur=%.2f durOk=%d"
+        std::snprintf(sb, sizeof sb,                      " audio smoke: FAIL (ok=%d loaded=%d async=%d dur=%.2f durOk=%d timelineDur=%d"
                       " env=%d kicks=%zu"
                       " [first=%.2f last=%.2f mean=%.3f] saved=%d off=%d quant=%d"
                       " spec=%d browse=%d live=%d multi=%d rel=%d pick=%d"
                       " panel=%d toSilent=%d restored=%d bogus=%d)",
                       (int)ok, (int)loaded, (int)asyncOk, dur, (int)durOk,
-                      (int)envOk, kickTimes_.size(),
+                      (int)timelineDurationOk, (int)envOk, kickTimes_.size(),
                       kickTimes_.empty() ? 0.0f : kickTimes_.front(),
                       kickTimes_.empty() ? 0.0f : kickTimes_.back(),
                       kickTimes_.size() > 1
@@ -1834,36 +1882,57 @@ void DemoEditor::togglePlayback() {
   // Editor startup is intentionally paused. Start the audio clock only when
   // the author actually presses Play/Space; this keeps a loaded track from
   // running ahead while the transport is stopped.
-  if (w_.director && w_.director->paused && w_.audio && !w_.audio->started)
+  viewportFocusLock_ = false;
+  if (!w_.director) return;
+  const bool wasPaused = w_.director->paused;
+  if (wasPaused && w_.audio && !w_.audio->started)
     w_.audio->start();
-  if (w_.director) w_.director->togglePause();
+  w_.director->togglePause();
+  // The editor transport and audio clock are one playback control. This is
+  // important after startup, where the shared player may already have opened
+  // the device before the editor intentionally paused the director.
+  if (w_.audio) w_.audio->setPlaying(!w_.director->paused);
 }
 
 void DemoEditor::handleKeys() {
   if (flyActive_) return;  // fly mode owns the keyboard (Space is handled there)
   ImGuiIO& io = ImGui::GetIO();
-  // don't steal keys the user is typing into a field, or Space/Enter from a
-  // widget that has keyboard focus (ImGui would ALSO activate that widget,
-  // double-firing e.g. Play/Pause or Step)
-  if (io.WantTextInput || ImGui::IsAnyItemFocused()) return;
+  // Shader Lab owns Ctrl+S while its source editor is open, even when the
+  // multiline GLSL field has text focus. Do this before the general text-input
+  // guard so saving a shader never accidentally saves the production instead.
+  if (showShaderLab_ && io.KeyCtrl && !io.KeyShift &&
+      ImGui::IsKeyPressed(ImGuiKey_S)) {
+    shaderLab_.saveCurrentAsset();
+    return;
+  }
+  // Text fields keep ownership of Space so shader/source editing remains
+  // possible. Handle Space before the generic focused-widget guard: timeline
+  // rows, sliders, and buttons can retain ImGui focus while the author still
+  // expects Space to pause the running audio.
+  if (io.WantTextInput) return;
+  if (ImGui::IsKeyPressed(ImGuiKey_Space)) {
+    togglePlayback();
+    return;
+  }
+  if (ImGui::IsAnyItemFocused()) return;
   // Ctrl+T opens the audio source popup even when the toolbar is hidden -
   // the TRK control must never be unreachable (a stale imgui.ini or a closed
   // toolbar hides it, and the popup now renders from frame() so it works)
   if (ImGui::IsKeyPressed(ImGuiKey_T) && io.KeyCtrl && !io.KeyShift)
     ImGui::OpenPopup("Audio");
-  // F toggles timeline fit: whole show at a glance, F again restores the
-  // previous zoom/scroll (modifier-guarded so Ctrl+F/etc. never triggers it)
+  // F/Home follow the context: over the viewport they frame the selected/all
+  // visible scene content; elsewhere they retain the video-editor timeline
+  // fit behavior. This keeps the established timeline shortcut useful while
+  // making viewport authoring feel native.
   if (ImGui::IsKeyPressed(ImGuiKey_F) && !io.KeyCtrl && !io.KeyShift &&
-      !io.KeyAlt)
-    fitTimeline();
-  // Home is the conventional video-editor shortcut for fitting the complete
-  // production in the timeline; F remains the toggle that restores the prior
-  // zoomed view.
+      !io.KeyAlt) {
+    if (viewportFocused_) frameViewportSelection(selNode_ == nullptr);
+    else fitTimeline();
+  }
   if (ImGui::IsKeyPressed(ImGuiKey_Home) && !io.KeyCtrl && !io.KeyShift &&
-      !io.KeyAlt)
-    fitTimeline();
-  if (ImGui::IsKeyPressed(ImGuiKey_Space)) {
-    togglePlayback();
+      !io.KeyAlt) {
+    if (viewportFocused_) frameViewportSelection(true);
+    else fitTimeline();
   }
   if (ImGui::IsKeyPressed(ImGuiKey_R)) {
     if (w_.director) w_.director->init(0);
@@ -1899,8 +1968,14 @@ void DemoEditor::handleKeys() {
   if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Y)) redoDocument();
   if (ImGui::IsKeyPressed(ImGuiKey_F2) && w_.app) w_.app->reloadScript();
   if (ImGui::IsKeyPressed(ImGuiKey_F11) && w_.toggleFullscreen) w_.toggleFullscreen();
-  if (ImGui::IsKeyPressed(ImGuiKey_Delete) && selNode_ && selNode_->parent) {
-    deleteNode(selNode_);
+  if (io.KeyCtrl && io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_C))
+    createCameraFromView();
+  if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_D) &&
+      !selectedTimelineEvent_.empty())
+    duplicateSelectedTimelineEvent();
+  if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+    if (selNode_ && selNode_->parent) deleteNode(selNode_);
+    else if (!selectedTimelineEvent_.empty()) deleteSelectedTimelineEvent();
   }
 }
 
@@ -1969,7 +2044,8 @@ void DemoEditor::drawMenuBar() {
     }
     if (ImGui::MenuItem("Stop")) {
       if (w_.director) w_.director->paused = true;
-      w_.director->show = 0;
+      if (w_.audio) w_.audio->setPlaying(false);
+      if (w_.director) w_.director->show = 0;
       if (w_.app) w_.app->seek(0);
     }
     ImGui::Separator();
@@ -1985,6 +2061,8 @@ void DemoEditor::drawMenuBar() {
   if (ImGui::BeginMenu("View")) {
     if (ImGui::MenuItem("Fullscreen Preview")) toggleFullscreenPreview();
     if (ImGui::MenuItem("Fly Camera", "RMB drag")) toggleFly();
+    if (ImGui::MenuItem("Create Camera From View", "Ctrl+Alt+C"))
+      createCameraFromView();
     ImGui::Separator();
     ImGui::MenuItem("Toolbar", nullptr, &showToolbar_);
     ImGui::MenuItem("Hierarchy", nullptr, &showHierarchy_);
@@ -1996,6 +2074,11 @@ void DemoEditor::drawMenuBar() {
     ImGui::MenuItem("Shader Lab", nullptr, &showShaderLab_);
     ImGui::MenuItem("NSD Commands", nullptr, &showNsdCommands_);
     ImGui::MenuItem("Curves", nullptr, &showCurves_);
+    ImGui::SeparatorText("Viewport guides");
+    if (ImGui::MenuItem("Grid", nullptr, &showGrid_)) scheduleSaveEditorState();
+    if (ImGui::MenuItem("World axes", nullptr, &showAxes_)) scheduleSaveEditorState();
+    if (ImGui::MenuItem("Safe frame", nullptr, &showSafeFrame_)) scheduleSaveEditorState();
+    if (ImGui::MenuItem("Center crosshair", nullptr, &showCrosshair_)) scheduleSaveEditorState();
     // discoverable way to open the drop history without knowing about the
     // Console's right-click (the smoke uses it to render the popup live too)
     if (ImGui::MenuItem("OS Drop History")) dropHistoryOpen_ = true;
@@ -2053,6 +2136,7 @@ void DemoEditor::drawToolbar() {
   ImGui::SameLine();
   if (ImGui::Button("[] Stop")) {
     if (w_.director) w_.director->paused = true;
+    if (w_.audio) w_.audio->setPlaying(false);
     if (w_.director) w_.director->show = 0;
     if (w_.app) w_.app->seek(0);
   }
@@ -2212,6 +2296,7 @@ void DemoEditor::drawViewportPanel() {
     SceneNode* textNode =
         (selNode_ && selNode_->type == NodeType::Text) ? selNode_ : nullptr;
     if (textNode) {
+      TextData* textData = textNode->asText();
       const std::string dragKey =
           (w_.app ? w_.app->activeScene() : std::string()) + "\x1f" + textNode->name;
       const float ndcX = textNode->pos[0] * 0.5f;
@@ -2222,6 +2307,18 @@ void DemoEditor::drawViewportPanel() {
       const float dx = mouse.x - anchor.x;
       const float dy = mouse.y - anchor.y;
       const bool nearAnchor = dx * dx + dy * dy <= 26.0f * 26.0f;
+      const float viewportScale = img.y / std::max(1.0f, (float)viewport_.h);
+      const float textHeight = textData ? std::max(16.0f, textData->sizePx * viewportScale) : 24.0f;
+      const float textWidth = textData
+                                  ? std::max(36.0f, (float)textData->text.size() *
+                                                    textData->sizePx * 0.56f * viewportScale)
+                                  : 120.0f;
+      const ImVec2 textBoxMin(anchor.x - textWidth * 0.5f,
+                              anchor.y - textHeight * 0.5f);
+      const ImVec2 textBoxMax(anchor.x + textWidth * 0.5f,
+                              anchor.y + textHeight * 0.5f);
+      const bool insideTextBox = mouse.x >= textBoxMin.x && mouse.x <= textBoxMax.x &&
+                                 mouse.y >= textBoxMin.y && mouse.y <= textBoxMax.y;
 
       // The handle is intentionally visible even when the text itself is
       // obscured by a shader or post effect; it is an editor affordance, not
@@ -2236,9 +2333,12 @@ void DemoEditor::drawViewportPanel() {
       dl->AddLine(ImVec2(anchor.x, anchor.y - 20),
                   ImVec2(anchor.x, anchor.y + 20),
                   c32(177, 140, 255, 110), 1.0f);
-      if (viewportHovered_ && nearAnchor && !textNodeDragging_)
+      if (viewportHovered_ && nearAnchor && !textNodeDragging_ && !textViewportEditing_)
         dl->AddText(ImVec2(anchor.x + 18, anchor.y - 9), kViolet,
                     "drag text");
+      if (viewportHovered_ && insideTextBox && !textNodeDragging_ && !textViewportEditing_)
+        dl->AddText(ImVec2(textBoxMin.x, textBoxMin.y - 18), kViolet,
+                    "double-click to edit text");
 
       if (textNodeDragging_ && textDragNodeKey_ != dragKey) {
         // Scene activation/reload invalidated the gesture between frames.
@@ -2249,13 +2349,69 @@ void DemoEditor::drawViewportPanel() {
         textDragMoved_ = false;
       }
 
-      if (!textNodeDragging_ && viewportHovered_ && nearAnchor &&
+      if (!textNodeDragging_ && !textViewportEditing_ && viewportHovered_ &&
+          ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && insideTextBox) {
+        textViewportEditing_ = true;
+        textViewportChanged_ = false;
+        textViewportEditNode_ = textNode->name;
+        std::fill(textEditBuf_.begin(), textEditBuf_.end(), '\0');
+        if (textData)
+          std::snprintf(textEditBuf_.data(), textEditBuf_.size(), "%s", textData->text.c_str());
+        doc_.beginEdit("edit viewport text");
+        viewportFocused_ = true;
+      }
+
+      if (!textNodeDragging_ && !textViewportEditing_ && viewportHovered_ && nearAnchor &&
           ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         textNodeDragging_ = true;
         textDragNodeKey_ = dragKey;
         textDragMoved_ = false;
         doc_.beginEdit("move text node");
         viewportFocused_ = true;
+      }
+
+      if (textViewportEditing_ && textViewportEditNode_ == textNode->name && textData) {
+        const ImVec2 restoreCursor = ImGui::GetCursorScreenPos();
+        const float editW = std::min(std::max(220.0f, textWidth + 80.0f),
+                                     std::max(220.0f, avail.x - 20.0f));
+        const float editH = std::min(std::max(54.0f, textHeight + 28.0f), 150.0f);
+        const float editX = clampf(textBoxMin.x, o.x + 6.0f,
+                                   o.x + std::max(6.0f, avail.x - editW - 6.0f));
+        const float editY = clampf(textBoxMin.y, o.y + 6.0f,
+                                   o.y + std::max(6.0f, avail.y - editH - 6.0f));
+        ImGui::SetCursorScreenPos(ImVec2(editX, editY));
+        ImGui::SetNextItemWidth(editW);
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && insideTextBox)
+          ImGui::SetKeyboardFocusHere();
+        const bool changed = ImGui::InputTextMultiline(
+            "##viewport_text_edit", textEditBuf_.data(), textEditBuf_.size(),
+            ImVec2(editW, editH), ImGuiInputTextFlags_AllowTabInput);
+        if (changed) {
+          textData->text.assign(textEditBuf_.data());
+          textNode->dirty = true;
+          patchDocumentText(doc_, w_.app ? w_.app->activeScene() : "",
+                            textNode->name, textData->text);
+          textViewportChanged_ = true;
+        }
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("Live text edit: click outside or press Escape to finish");
+        const bool cancel = ImGui::IsKeyPressed(ImGuiKey_Escape);
+        const bool finish = ImGui::IsItemDeactivatedAfterEdit() ||
+                            ImGui::IsKeyPressed(ImGuiKey_Enter) && ImGui::GetIO().KeyCtrl;
+        ImGui::SetCursorScreenPos(restoreCursor);
+        if (cancel) {
+          doc_.cancelEdit();
+          textViewportEditing_ = false;
+          textViewportChanged_ = false;
+          textViewportEditNode_.clear();
+          textEditNodeKey_.clear();
+        } else if (finish) {
+          doc_.endEdit();
+          textViewportEditing_ = false;
+          textEditNodeKey_.clear();
+          if (textViewportChanged_) textViewportCommitQueued_ = true;
+          textViewportChanged_ = false;
+        }
       }
 
       if (textNodeDragging_) {
@@ -2295,6 +2451,36 @@ void DemoEditor::drawViewportPanel() {
       }
     }
 
+    // Optional viewport guides stay disabled by default so the editor remains
+    // clean for composition previews. They are editor overlays and never enter
+    // the captured/exported frame.
+    if (showGrid_) {
+      const ImU32 grid = c32(125, 179, 255, 42);
+      for (int i = 1; i < 10; ++i) {
+        const float x = p0.x + img.x * (float)i / 10.0f;
+        const float y = p0.y + img.y * (float)i / 10.0f;
+        dl->AddLine(ImVec2(x, p0.y), ImVec2(x, p0.y + img.y), grid);
+        dl->AddLine(ImVec2(p0.x, y), ImVec2(p0.x + img.x, y), grid);
+      }
+    }
+    if (showSafeFrame_) {
+      const ImVec2 a(p0.x + img.x * 0.05f, p0.y + img.y * 0.05f);
+      const ImVec2 b(p0.x + img.x * 0.95f, p0.y + img.y * 0.95f);
+      dl->AddRect(a, b, c32(255, 196, 107, 150), 0.0f, 0, 1.0f);
+    }
+    if (showCrosshair_) {
+      const ImVec2 c(p0.x + img.x * 0.5f, p0.y + img.y * 0.5f);
+      dl->AddLine(ImVec2(c.x - 14, c.y), ImVec2(c.x + 14, c.y), c32(255, 255, 255, 130));
+      dl->AddLine(ImVec2(c.x, c.y - 14), ImVec2(c.x, c.y + 14), c32(255, 255, 255, 130));
+    }
+    if (showAxes_) {
+      const ImVec2 a(p0.x + 26.0f, p0.y + img.y - 28.0f);
+      dl->AddLine(a, ImVec2(a.x + 22, a.y), c32(255, 95, 143, 220), 2.0f);
+      dl->AddLine(a, ImVec2(a.x, a.y - 22), c32(94, 240, 200, 220), 2.0f);
+      dl->AddText(ImVec2(a.x + 25, a.y - 7), kHot, "X");
+      dl->AddText(ImVec2(a.x - 5, a.y - 34), kPhosphor, "Y");
+    }
+
     // HUD overlay (top-left: perf, top-right: show state, bottom-left: time)
     char buf[192];
     const float show = w_.director ? w_.director->show : 0;
@@ -2314,7 +2500,7 @@ void DemoEditor::drawViewportPanel() {
 
     // fly camera HUD + hint
     if (flyActive_) {
-      const char* flyLine = "FLY CAM  WASD move  Shift fast  Q/E up/down  RMB release";
+      const char* flyLine = "FREE CAMERA  WASD move  RMB look  Shift fast  Ctrl slow  Q/E up/down  RMB release";
       const ImVec2 ts = ImGui::CalcTextSize(flyLine);
       dl->AddText(ImVec2(p0.x + (img.x - ts.x) * 0.5f, p0.y + 8), kHot, flyLine);
       std::snprintf(buf, sizeof buf, "speed %.1f u/s", flySpeed_);
@@ -2365,6 +2551,7 @@ void DemoEditor::drawNodeRec(SceneNode* n) {
                        : (n->type == NodeType::Mesh)   ? kHot
                        : (n->type == NodeType::Text)   ? kViolet
                        : (n->type == NodeType::Sprite) ? kPhosphor
+                       : (n->type == NodeType::Video)  ? kViolet
                        : (n->type == NodeType::Particles) ? kPhosphor
                        : (n->type == NodeType::Quad)   ? kAmber
                        : (n->type == NodeType::Post)   ? kHot
@@ -2735,6 +2922,12 @@ void DemoEditor::inspectScene() {
   if (ImGui::IsItemDeactivatedAfterEdit()) commitField();
 
   ImGui::SeparatorText("Camera Rig");
+  if (ImGui::Button("Create Camera From View")) {
+    createCameraFromView();
+    scene = doc_.findScene(selScene_);
+  }
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Create or update this scene camera from the current viewport pose");
   Cmd* cameraCmd = sceneCameraCommand(scene);
   if (!cameraCmd) {
     ImGui::TextDisabled("This scene has no camera rig command.");
@@ -3125,6 +3318,20 @@ void DemoEditor::inspectNode(SceneNode* n) {
         ImGui::DragFloat3("Size", d->size.data(), 0.05f);
       }
       break;
+    case NodeType::Video:
+      if (auto* d = n->asVideo()) {
+        ImGui::SeparatorText("Video");
+        std::snprintf(buf, sizeof buf, "%s", d->file.c_str());
+        if (ImGui::InputText("file", buf, sizeof buf)) d->file = buf;
+        ImGui::DragInt("decode width", &d->width, 8, 2, 4096);
+        ImGui::DragInt("decode height", &d->height, 8, 2, 4096);
+        ImGui::DragFloat("fps", &d->fps, 0.5f, 1.0f, 240.0f);
+        ImGui::Checkbox("loop", &d->loop);
+        ImGui::DragFloat("opacity", &d->opacity, 0.01f, 0.0f, 1.0f);
+        ImGui::DragFloat3("Size", d->size.data(), 0.05f);
+        ImGui::TextDisabled("Use: video clip.mp4 { size (2 2 1) loop true }");
+      }
+      break;
     case NodeType::Text:
       if (auto* d = n->asText()) {
         ImGui::SeparatorText("Text");
@@ -3322,17 +3529,21 @@ void DemoEditor::drawTimeline() {
   ImGui::Begin("Timeline", &showTimeline_);
   recordPanelRect(DropPanel::Timeline);  // OS-drop target: audio/scripts
   const TimelineEditor& te = w_.app->editor();
-  const float show = w_.director ? w_.director->show : 0;
+  const float contentDuration = timelineContentDuration();
+  float show = w_.director ? w_.director->show : 0;
 
   ImGui::PushItemWidth(130);
   // The slider must be able to represent the entire production. The old
   // fixed 240-second ceiling made a 346-second show impossible to fit and
   // silently clipped the Fit state back to 240 seconds on the next frame.
-  const float maxView = std::max(240.0f, std::max(te.duration, 8.0f));
+  const float maxView = std::max(240.0f, std::max(contentDuration, 8.0f));
   if (ImGui::SliderFloat("view", &tlZoom_, 8.0f, maxView, "%.0f s")) {
-    tlT0_ = clampTlT0(tlT0_, tlZoom_, te.duration);  // keep the window in range
+    tlT0_ = clampTlT0(tlT0_, tlZoom_, contentDuration);  // keep the window in range
     tlFitZoom_ = -1.0f;  // a manual zoom leaves fit mode; the next F re-fits
   }
+  // Keep a loaded track's tail reachable even if the project show is shorter.
+  // This also handles an async audio swap arriving while the timeline is open.
+  tlT0_ = clampTlT0(tlT0_, tlZoom_, contentDuration);
   // the zoom sticks per-show: debounced save once the drag/click releases
   if (ImGui::IsItemDeactivatedAfterEdit()) scheduleSaveEditorState();
   ImGui::PopItemWidth();
@@ -3349,7 +3560,7 @@ void DemoEditor::drawTimeline() {
   if (ImGui::IsItemHovered())
     ImGui::SetTooltip("Audio source (Ctrl+T): pick a .wav/.mp3, or stop audio");
   ImGui::SameLine();
-  ImGui::TextDisabled("drag ruler / lanes to scrub");
+  ImGui::TextDisabled("drag ruler / lanes to scrub • middle-drag to pan • wheel to zoom");
   ImGui::Separator();
 
   const float w = std::max(ImGui::GetContentRegionAvail().x, 60.0f);
@@ -3359,6 +3570,10 @@ void DemoEditor::drawTimeline() {
 
   auto xOf = [&](float t) { return (t - tlT0_) * w / tlZoom_; };
   auto tOf = [&](float x) { return tlT0_ + x * tlZoom_ / w; };
+  auto seekToAndUpdateLabel = [&](float t) {
+    seekTo(t);
+    show = w_.director ? w_.director->show : t;
+  };
 
   // --- ruler ------------------------------------------------------------------
   ImGui::InvisibleButton("tl_ruler", ImVec2(w, rulerH));
@@ -3446,7 +3661,7 @@ void DemoEditor::drawTimeline() {
   if ((ImGui::IsItemHovered() || ImGui::IsItemActive()) &&
       ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
     const float mx = io.MousePos.x - o.x;
-    if (mx >= 0 && mx <= w) seekTo(tOf(mx));
+    if (mx >= 0 && mx <= w) seekToAndUpdateLabel(tOf(mx));
   }
 
   // --- tracks -------------------------------------------------------------------
@@ -3483,15 +3698,21 @@ void DemoEditor::drawTimeline() {
   for (const auto& ev : te.events) {
     int r = ev.track >= 0 && ev.track < rows ? ev.track : 0;
     if (!ev.enabled) continue;
-    const float x0 = to.x + xOf(ev.time);
+    const float eventTime =
+        timelineEventDragging_ && selectedTimelineEvent_ == ev.name
+            ? timelineEventDragT0_ : ev.time;
+    const float x0 = to.x + xOf(eventTime);
     const float dur = std::max(ev.duration, 0.35f);
-    const float x1 = to.x + xOf(ev.time + dur);
+    const float x1 = to.x + xOf(eventTime + dur);
     if (x1 < to.x || x0 > to.x + w) continue;
     const ImU32 col = kTrackPalette[(size_t)r % 8];
+    const bool selected = selectedTimelineEvent_ == ev.name;
     const float y0 = to.y + r * rowH + 6, y1 = to.y + (r + 1) * rowH - 8;
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), (col & 0x00FFFFFFu) | 0x50000000u);
-    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), col);
-    dl->AddText(ImVec2(x0 + 5, y0 + 4), col, ev.name.c_str());
+    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1),
+                      selected ? (col & 0xA0FFFFFFu) : (col & 0x50000000u));
+    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), selected ? kHot : col,
+                2.0f, 0, selected ? 2.0f : 1.0f);
+    dl->AddText(ImVec2(x0 + 5, y0 + 4), selected ? kHot : col, ev.name.c_str());
   }
 
   // clips: brackets
@@ -3512,10 +3733,66 @@ void DemoEditor::drawTimeline() {
     dl->AddLine(ImVec2(x, to.y), ImVec2(x, to.y + contentH), kHot, 1.5f);
   }
   ImGui::InvisibleButton("tl_canvas", ImVec2(w, contentH));
-  if ((ImGui::IsItemHovered() || ImGui::IsItemActive()) &&
-      ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+  if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
     const float mx = io.MousePos.x - to.x;
-    if (mx >= 0 && mx <= w) seekTo(tOf(mx));
+    const float my = io.MousePos.y - to.y;
+    selectedTimelineEvent_.clear();
+    for (const auto& ev : te.events) {
+      if (!ev.enabled) continue;
+      const int er = ev.track >= 0 && ev.track < rows ? ev.track : 0;
+      const float ex0 = xOf(ev.time);
+      const float ex1 = xOf(ev.time + std::max(ev.duration, 0.35f));
+      const float ey0 = er * rowH + 4.0f;
+      const float ey1 = (er + 1) * rowH - 5.0f;
+      if (mx >= ex0 && mx <= ex1 && my >= ey0 && my <= ey1) {
+        selectedTimelineEvent_ = ev.name;
+        int topIndex = -1;
+        if (topLevelTimelineIndex(ev.name, topIndex)) {
+          timelineEventDragging_ = true;
+          timelineEventMoved_ = false;
+          timelineEventDragT0_ = ev.time;
+          doc_.beginEdit("move timeline event");
+        }
+        break;
+      }
+    }
+    if (!selectedTimelineEvent_.empty()) {
+      showToast("selected " + selectedTimelineEvent_ + "  (drag to move, Ctrl+D duplicate, Del delete)", 2);
+    } else if (mx >= 0 && mx <= w) {
+      seekToAndUpdateLabel(tOf(mx));
+    }
+  } else if (!timelineEventDragging_ &&
+             (ImGui::IsItemHovered() || ImGui::IsItemActive()) &&
+             ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    const float mx = io.MousePos.x - to.x;
+    if (mx >= 0 && mx <= w) seekToAndUpdateLabel(tOf(mx));
+  }
+  if (timelineEventDragging_) {
+    int topIndex = -1;
+    if (!topLevelTimelineIndex(selectedTimelineEvent_, topIndex) ||
+        topIndex < 0 || topIndex >= (int)doc_.ast.main.size()) {
+      doc_.cancelEdit();
+      timelineEventDragging_ = false;
+      timelineEventMoved_ = false;
+    } else if (io.MouseDown[ImGuiMouseButton_Left]) {
+      const float next = clampf(tOf(io.MousePos.x - to.x), 0.0f,
+                                te.duration > 0 ? te.duration : 100000.0f);
+      if (std::fabs(next - timelineEventDragT0_) > 0.0005f) {
+        doc_.ast.main[(size_t)topIndex].time = next;
+        timelineEventDragT0_ = next;
+        timelineEventMoved_ = true;
+      }
+    } else {
+      if (timelineEventMoved_) {
+        doc_.endEdit();
+        if (writeDocument()) showToast("timeline event moved", 2);
+      } else {
+        doc_.cancelEdit();
+      }
+      timelineEventDragging_ = false;
+      timelineEventMoved_ = false;
+      selectedTimelineEvent_.clear();
+    }
   }
   ImGui::EndChild();
   ImGui::PopStyleVar();
@@ -3724,7 +4001,7 @@ void DemoEditor::drawTimeline() {
   // scrub (below the grid editor zone, or any press that isn't on a grid line)
   if (!beatDrag_ && inStrip && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
       (my >= gridZoneY || beat <= 0)) {
-    if (mx >= 0 && mx <= w) seekTo(tOf(mx));
+    if (mx >= 0 && mx <= w) seekToAndUpdateLabel(tOf(mx));
   }
 
   // alignment readout: the grid phase in ms (and a hint when kicks are shown)
@@ -3735,13 +4012,53 @@ void DemoEditor::drawTimeline() {
   } else if (!kickTimes_.empty() && my >= gridZoneY) {
     dl->AddText(ImVec2(ao.x + 6, ao.y + 21), kFaint, "drag grid / click kick / RMB auto-align");
   }
+  // Direct timeline navigation: middle-drag pans the time window and the
+  // wheel zooms around the cursor. The gestures work across the ruler, lanes,
+  // and audio strip, including when audio extends beyond the NSD show.
+  {
+    const bool timelineHovered =
+        ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
+    const ImVec2 windowPos = ImGui::GetWindowPos();
+    const float windowBottom = windowPos.y + ImGui::GetWindowHeight();
+    const bool overTimelineContent =
+        timelineHovered && io.MousePos.x >= o.x && io.MousePos.x <= o.x + w &&
+        io.MousePos.y >= o.y && io.MousePos.y <= windowBottom;
+    const bool panInput = io.MouseDown[ImGuiMouseButton_Middle];
+
+    if (overTimelineContent && panInput) {
+      if (!timelinePanning_) {
+        timelinePanning_ = true;
+        timelinePanStartX_ = io.MousePos.x;
+        timelinePanStartT0_ = tlT0_;
+      }
+      const float dx = io.MousePos.x - timelinePanStartX_;
+      tlT0_ = clampTlT0(timelinePanStartT0_ - dx * tlZoom_ / w,
+                        tlZoom_, contentDuration);
+      tlFitZoom_ = -1.0f;
+    } else if (timelinePanning_) {
+      timelinePanning_ = false;
+      scheduleSaveEditorState();
+    }
+
+    if (overTimelineContent && !timelinePanning_ && io.MouseWheel != 0.0f) {
+      const float oldZoom = tlZoom_;
+      const float anchorRatio = clampf((io.MousePos.x - o.x) / w, 0.0f, 1.0f);
+      const float anchorTime = tlT0_ + anchorRatio * oldZoom;
+      const float zoomFactor = std::pow(0.85f, io.MouseWheel);
+      tlZoom_ = clampf(oldZoom * zoomFactor, 8.0f, maxView);
+      tlT0_ = clampTlT0(anchorTime - anchorRatio * tlZoom_,
+                        tlZoom_, contentDuration);
+      tlFitZoom_ = -1.0f;
+      scheduleSaveEditorState();
+    }
+  }
+
   // --- horizontal scrollbar: pan the visible window [tlT0_, tlT0_+tlZoom_]
-  // over the show duration (previously tlT0_ stayed pinned at 0, so there
-  // was no way to look ahead in a long show). Geometry/mapping live in the
+  // over the full show/audio content duration. Geometry/mapping live in the
   // pure helpers above so the smoke can regression-test them.
   {
     const float sbH = 14.0f;
-    const TlScrollGeom sg = tlScrollGeom(w, tlZoom_, te.duration);
+    const TlScrollGeom sg = tlScrollGeom(w, tlZoom_, contentDuration);
     ImVec2 so = ImGui::GetCursorScreenPos();
     // pin to the panel's bottom edge: in a docked window taller than the
     // content the bar would otherwise float under the strip with dead space
@@ -3766,7 +4083,7 @@ void DemoEditor::drawTimeline() {
         // hw/2 centering is the same convention as ImGui's own scrollbars
         // (the thumb centers on the click point).
         const float mx = io.MousePos.x - so.x - sg.hw * 0.5f;
-        tlT0_ = tlScrollValue(mx, sg, tlZoom_, te.duration);
+        tlT0_ = tlScrollValue(mx, sg, tlZoom_, contentDuration);
         tlFitZoom_ = -1.0f;  // manual scroll leaves fit mode too
       }
       // the pan sticks per-show: debounced save when the drag releases
@@ -3968,6 +4285,23 @@ void DemoEditor::drawAssets() {
       {"data", w_.dataDir, kBlue},
   };
 
+  // The shared Open Asset popup already exposes drag payloads, but the docked
+  // Assets panel used to make fragment shader rows selectable only. Keep the
+  // payload identical so every existing viewport/panel drop target accepts a
+  // shader dragged directly from this list.
+  const auto dragFragmentShader = [](const std::string& full,
+                                     const char* label) {
+    if (std::filesystem::path(full).extension().string() != ".frag") return;
+    if (!ImGui::BeginDragDropSource()) return;
+    BrowseDragPayload d{};
+    d.kind = (int)BrowseKind::Shader;
+    std::strncpy(d.path, full.c_str(), sizeof(d.path) - 1);
+    d.path[sizeof(d.path) - 1] = '\0';
+    ImGui::SetDragDropPayload(kBrowseDragType, &d, sizeof(d));
+    ImGui::TextUnformatted(label);
+    ImGui::EndDragDropSource();
+  };
+
   for (const Root& root : roots) {
     if (root.path.empty() || !std::filesystem::is_directory(root.path)) continue;
     if (ImGui::CollapsingHeader(root.label, ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -3987,6 +4321,7 @@ void DemoEditor::drawAssets() {
             if (nm[0] == '.') continue;
             const std::string full = f.path().string();
             if (ImGui::Selectable(nm.c_str(), selAsset_ == full)) selAsset_ = full;
+            dragFragmentShader(full, nm.c_str());
           }
           ImGui::TreePop();
         }
@@ -4000,6 +4335,7 @@ void DemoEditor::drawAssets() {
         if (nm[0] == '.') continue;
         const std::string full = f.path().string();
         if (ImGui::Selectable(nm.c_str(), selAsset_ == full)) selAsset_ = full;
+        dragFragmentShader(full, nm.c_str());
       }
     }
   }
@@ -4147,6 +4483,47 @@ void DemoEditor::toggleFly() {
   }
 }
 
+void DemoEditor::applyViewportFocus() {
+  if (!w_.camera) return;
+  w_.camera->pos = viewportFocusPos_;
+  w_.camera->quat = viewportFocusQuat_;
+  w_.camera->update(0.0f);
+}
+
+void DemoEditor::frameViewportSelection(bool allVisible) {
+  if (!w_.app || !w_.camera) return;
+  SceneGraph& graph = w_.app->editableScene();
+  V3 minP{0, 0, 0}, maxP{0, 0, 0};
+  bool found = false;
+  auto include = [&](SceneNode* node) {
+    if (!node || node == graph.root() || !node->isActive()) return;
+    const V3 p{node->world[12], node->world[13], node->world[14]};
+    if (!found) minP = maxP = p;
+    else {
+      for (int i = 0; i < 3; ++i) {
+        minP[i] = std::min(minP[i], p[i]);
+        maxP[i] = std::max(maxP[i], p[i]);
+      }
+    }
+    found = true;
+  };
+  if (!allVisible && selNode_) include(selNode_);
+  if (allVisible || !found) graph.walk(include);
+  if (!found) {
+    showToast("viewport: nothing visible to frame", 1);
+    return;
+  }
+  const V3 center = vScale(vAdd(minP, maxP), 0.5f);
+  const float radius = std::max(0.75f, vLen(vSub(maxP, minP)) * 0.5f);
+  V3 fwd = vNorm(w_.camera->fwd);
+  if (vLen(fwd) < 0.01f) fwd = V3{0, 0, -1};
+  viewportFocusPos_ = vSub(center, vScale(fwd, std::max(2.0f, radius * 2.8f)));
+  viewportFocusQuat_ = quatFromLookAt(vSub(center, viewportFocusPos_), V3{0, 1, 0});
+  viewportFocusLock_ = true;
+  applyViewportFocus();
+  showToast(allVisible ? "viewport: framed visible scene" : "viewport: framed selection", 2);
+}
+
 /** poll raw GLFW state each frame: engage/disengage fly, mouse-look, WASD move.
  *  Called before the engine step; the accumulated state is applied to the
  *  engine Camera in applyFlyCamera() after the show camera runs. */
@@ -4198,8 +4575,9 @@ void DemoEditor::pollViewportInput(float dt) {
   const bool qKey = glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS;
   const bool eKey = glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS;
   const bool boost = glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+  const bool slow = glfwGetKey(win, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS;
 
-  const float speed = flySpeed_ * (boost ? 4.0f : 1.0f) * dt;
+  const float speed = flySpeed_ * (boost ? 4.0f : slow ? 0.25f : 1.0f) * dt;
   const float cy = std::cos(flyPitch_);
   const V3 fwd{(float)(std::sin(flyYaw_) * cy), (float)std::sin(flyPitch_),
                (float)(std::cos(flyYaw_) * cy)};
@@ -4259,13 +4637,41 @@ void DemoEditor::seekToRaw(float t) {
   if (w_.timeline) w_.timeline->advance(t);
   if (w_.app) w_.app->seek(t);
   if (w_.audio) w_.audio->seekTrack(t);  // scrubbing re-syncs the music too
+  // The actual redraw is deferred until all panels finish processing input so
+  // a drag that hits ruler, lanes, and strip cannot render the engine several
+  // times in one ImGui frame.
+  seekPreviewPending_ = true;
+}
+
+void DemoEditor::refreshSeekPreview() {
+  if (!seekPreviewPending_) return;
+  seekPreviewPending_ = false;
+
+  const float show = w_.director ? w_.director->show : 0.0f;
+  // seek() has already queued crossed events; update(0) consumes those events,
+  // rebuilds the scene graph/camera state, and advances video mailboxes without
+  // moving the playhead further.
+  if (w_.timeline) w_.timeline->advance(show);
+  if (w_.app) w_.app->update(show, 0.0f);
+  if (w_.camera) w_.camera->update(0.0f);
+  if (flyActive_) applyFlyCamera(0.0f);
+  else if (viewportFocusLock_) applyViewportFocus();
+  if (w_.app) w_.app->render();
+  captureViewport();
+}
+
+float DemoEditor::timelineContentDuration() const {
+  const float showDuration = w_.app ? w_.app->editor().duration : 0.0f;
+  const float audioDuration =
+      w_.audio && w_.audio->trackMode ? w_.audio->trackDuration : 0.0f;
+  return std::max(showDuration, audioDuration);
 }
 
 void DemoEditor::fitTimeline() {
-  // F / the Fit button: whole show at a glance, press again to zoom back
+  // F / the Fit button: whole show and loaded audio at a glance, press again to zoom back
   // into where you were. Any manual zoom/scroll clears the saved toggle, so
   // the next F re-fits from the current view instead of restoring stale data.
-  const float dur = w_.app ? w_.app->editor().duration : 0.0f;
+  const float dur = timelineContentDuration();
   tlFitApply(dur, tlZoom_, tlT0_, tlFitZoom_, tlFitT0_);
   // the show may have changed since the view was saved (script reload,
   // header duration edit): re-clamp the restored window into range
@@ -4290,7 +4696,7 @@ bool DemoEditor::applyTimelineViewForShow(const std::string& key) {
   // the user zooms or pans, the per-project view is restored on the next
   // launch/switch instead of losing that authoring context.
   if (key.empty()) return false;
-  const float dur = w_.app ? w_.app->editor().duration : 0.0f;
+  const float dur = timelineContentDuration();
   const auto fitWholeShow = [&] {
     // Keep the current zoom as the Restore target, unless we were already in
     // fit mode (then tlFitZoom_ is the user's previous zoomed view).
@@ -4352,6 +4758,94 @@ void DemoEditor::seekTo(float t) {
     }
   }
   seekToRaw(t);
+}
+
+void DemoEditor::deleteSelectedTimelineEvent() {
+  if (!w_.app || selectedTimelineEvent_.empty()) return;
+  int index = -1;
+  if (!topLevelTimelineIndex(selectedTimelineEvent_, index)) {
+    showToast("scene-derived events are edited in the Scene inspector", 1);
+    return;
+  }
+  if (index < 0 || index >= (int)doc_.ast.main.size()) {
+    selectedTimelineEvent_.clear();
+    return;
+  }
+  doc_.beginEdit("delete timeline event");
+  doc_.ast.main.erase(doc_.ast.main.begin() + index);
+  doc_.endEdit();
+  if (writeDocument()) {
+    selectedTimelineEvent_.clear();
+    showToast("timeline event deleted", 2);
+  }
+}
+
+void DemoEditor::duplicateSelectedTimelineEvent() {
+  if (!w_.app || selectedTimelineEvent_.empty()) return;
+  int index = -1;
+  if (!topLevelTimelineIndex(selectedTimelineEvent_, index)) {
+    showToast("scene-derived events are duplicated from the Scene inspector", 1);
+    return;
+  }
+  if (index < 0 || index >= (int)doc_.ast.main.size()) {
+    selectedTimelineEvent_.clear();
+    return;
+  }
+  const float delta = w_.timeline ? std::max(0.25f, w_.timeline->barSec()) : 1.0f;
+  ScriptBlock copy = doc_.ast.main[(size_t)index];
+  copy.time += delta;
+  doc_.beginEdit("duplicate timeline event");
+  doc_.ast.main.push_back(std::move(copy));
+  if (doc_.ast.duration < doc_.ast.main.back().time)
+    doc_.ast.duration = doc_.ast.main.back().time;
+  std::stable_sort(doc_.ast.main.begin(), doc_.ast.main.end(),
+                   [](const ScriptBlock& a, const ScriptBlock& b) {
+                     return a.time < b.time;
+                   });
+  doc_.endEdit();
+  if (writeDocument()) {
+    selectedTimelineEvent_.clear();
+    showToast("timeline event duplicated one bar later", 2);
+  }
+}
+
+void DemoEditor::createCameraFromView() {
+  if (!w_.app || !w_.camera) return;
+  const std::string sceneName =
+      (doc_.findScene(selScene_) ? selScene_ : w_.app->activeScene());
+  SceneDef* scene = doc_.findScene(sceneName);
+  if (!scene) {
+    showToast("select a scheduled scene before creating a camera", 1);
+    return;
+  }
+
+  const V3 position = w_.camera->pos;
+  const V3 direction = vNorm(w_.camera->fwd);
+  const V3 target = vAdd(position, vScale(vLen(direction) > 0.01f
+                                               ? direction
+                                               : V3{0, 0, -1},
+                                           10.0f));
+  Cmd* camera = sceneCameraCommand(scene);
+  doc_.beginEdit("create camera from view");
+  if (!camera) {
+    Cmd created;
+    created.name = "camera";
+    created.args.push_back(Value(scene->name + "Cam"));
+    created.opts.set("rig") = Value("static");
+    scene->setup.insert(scene->setup.begin(), std::move(created));
+    camera = sceneCameraCommand(scene);
+  }
+  if (camera) {
+    camera->opts.set("rig") = Value("static");
+    camera->opts.set("pos") = cameraVecValue(position);
+    camera->opts.set("target") = cameraVecValue(target);
+    camera->opts.set("fov") = Value((double)(w_.camera->fov * 180.0f / 3.14159265f));
+  }
+  doc_.endEdit();
+  selScene_ = sceneName;
+  if (writeDocument()) {
+    showToast("camera created from viewport in " + sceneName, 2);
+  }
 }
 
 void DemoEditor::duplicateNode(SceneNode* n) {
@@ -4419,6 +4913,7 @@ const char* DemoEditor::iconFor(NodeType t) {
     case NodeType::Particles: return "Part";
     case NodeType::Quad: return "Quad";
     case NodeType::Sprite: return "Sprt";
+    case NodeType::Video: return "Video";
     case NodeType::Text: return "Text";
     case NodeType::Post: return "Post";
     case NodeType::TimelineSystem: return "Time";
@@ -4434,6 +4929,7 @@ const char* DemoEditor::typeLabel(NodeType t) {
     case NodeType::Particles: return "Particle System";
     case NodeType::Quad: return "Shader Quad";
     case NodeType::Sprite: return "Sprite";
+    case NodeType::Video: return "Video";
     case NodeType::Text: return "Text";
     case NodeType::Post: return "Post Effect";
     case NodeType::TimelineSystem: return "Timeline System";
@@ -4545,6 +5041,7 @@ const BrowseKindDef kBrowseKinds[] = {
      {".frag", ".vert", ".glsl"}, 3},
     {"model", "empty root lists data/models", "Load", {".obj", ".glb"}, 2},
     {"script", "empty root lists data/", "Open", {".nsd"}, 1},
+    {"video", "empty root lists data/video", "Add to scene", {".mp4", ".mkv", ".webm", ".mov"}, 4},
 };
 }  // namespace
 
@@ -4573,6 +5070,7 @@ std::vector<std::string> DemoEditor::browseRoots(int kind) const {
     case BrowseKind::Model:   roots = {w_.dataDir + "/models",
                                        w_.assetDir + "/models"}; break;
     case BrowseKind::Script:  roots = {w_.dataDir}; break;
+    case BrowseKind::Video:   roots = {w_.dataDir + "/video", w_.assetDir + "/video"}; break;
     default: break;
   }
   return roots;
@@ -4597,12 +5095,15 @@ bool DemoEditor::openNativeFileDialog(int kind) {
       L"Models\0*.obj;*.glb\0All files\0*.*\0\0";
   static const wchar_t kScriptFilter[] =
       L"Null Sector scripts\0*.nsd\0All files\0*.*\0\0";
+  static const wchar_t kVideoFilter[] =
+      L"Video files\0*.mp4;*.mkv;*.webm;*.mov\0All files\0*.*\0\0";
   const wchar_t* filter = kAudioFilter;
   switch ((BrowseKind)kind) {
     case BrowseKind::Texture: filter = kTextureFilter; break;
     case BrowseKind::Shader:  filter = kShaderFilter; break;
     case BrowseKind::Model:   filter = kModelFilter; break;
     case BrowseKind::Script:  filter = kScriptFilter; break;
+    case BrowseKind::Video:   filter = kVideoFilter; break;
     default: break;
   }
 
@@ -5002,6 +5503,70 @@ void DemoEditor::addShaderToScene(const std::string& path) {
                            (alreadyPresent ? "previewed in " : "added to ") + sceneName);
 }
 
+void DemoEditor::addVideoToScene(const std::string& path) {
+  if (!w_.app || path.empty()) return;
+  const std::filesystem::path source = std::filesystem::absolute(path).lexically_normal();
+  if (!std::filesystem::is_regular_file(source)) {
+    showToast("video: file not found - " + source.filename().string(), 0);
+    return;
+  }
+  const std::filesystem::path videoRoot =
+      std::filesystem::absolute(w_.dataDir + "/video").lexically_normal();
+  std::error_code ec;
+  std::filesystem::create_directories(videoRoot, ec);
+  if (ec) {
+    showToast("video: cannot create data/video", 0);
+    return;
+  }
+  std::filesystem::path target = videoRoot / source.filename();
+  if (source.parent_path() != videoRoot) {
+    if (std::filesystem::exists(target)) {
+      const std::string stem = source.stem().string();
+      const std::string ext = source.extension().string();
+      for (int suffix = 2; std::filesystem::exists(target); ++suffix)
+        target = videoRoot / (stem + "_scene" + std::to_string(suffix) + ext);
+    }
+    std::filesystem::copy_file(source, target,
+                                std::filesystem::copy_options::none, ec);
+    if (ec) {
+      showToast("video: copy failed - " + source.filename().string(), 0);
+      return;
+    }
+  }
+
+  const std::string sceneName = !selScene_.empty() ? selScene_ : w_.app->activeScene();
+  SceneDef* scene = sceneName.empty() ? nullptr : doc_.findScene(sceneName);
+  if (!scene) {
+    showToast("video: select a scene first", 1);
+    return;
+  }
+  const std::string fileRef = target.filename().string();
+  bool present = false;
+  for (const auto& cmd : scene->setup) {
+    if (cmd.name == "video" && !cmd.args.empty() && cmd.args[0].asStr() == fileRef) {
+      present = true;
+      break;
+    }
+  }
+  if (!present) {
+    Cmd cmd;
+    cmd.name = "video";
+    cmd.args.push_back(Value(fileRef));
+    Value size = Value::array();
+    size.push(Value(2.0)); size.push(Value(1.125)); size.push(Value(1.0));
+    cmd.opts.set("size") = std::move(size);
+    doc_.beginEdit("add video to scene");
+    scene->setup.push_back(std::move(cmd));
+    doc_.endEdit();
+    if (!doc_.dirty || !writeDocument()) {
+      showToast("video: could not save scene", 0);
+      return;
+    }
+  }
+  w_.app->reloadScript();
+  showToast("video: " + fileRef + " in " + sceneName, 2);
+}
+
 void DemoEditor::pickBrowseFile(int kind, const std::string& path) {
   if (kind == (int)BrowseKind::Audio) { applyAudioTrack(path); return; }
   if (!w_.app) return;
@@ -5033,6 +5598,7 @@ void DemoEditor::pickBrowseFile(int kind, const std::string& path) {
       break;
     }
     case BrowseKind::Script: switchShow(path); break;
+    case BrowseKind::Video: addVideoToScene(path); break;
     default: break;
   }
 }
@@ -5650,7 +6216,7 @@ void DemoEditor::drawBrowse() {
 
   // category selector: switching kinds swaps roots/exts/actions; each kind
   // keeps its own scan root + last pick (persisted in editor_state.json)
-  const char* kindNames[] = {"Audio", "Texture", "Shader", "Model", "Script"};
+  const char* kindNames[] = {"Audio", "Texture", "Shader", "Model", "Script", "Video"};
   if (ImGui::Combo("Type", &browseKind_, kindNames, (int)BrowseKind::Count)) {
     AssetBrowse& nb = browse_[browseKind_];
     if (!nb.scanned) {  // first look at this kind: list it now
@@ -5789,6 +6355,12 @@ void DemoEditor::saveEditorState() {
   }
   v.set("browsers") = browsers;
   v.set("browserKind") = Value(browseKind_);
+  Value guides = Value::object();
+  guides.set("grid") = Value(showGrid_);
+  guides.set("axes") = Value(showAxes_);
+  guides.set("safeFrame") = Value(showSafeFrame_);
+  guides.set("crosshair") = Value(showCrosshair_);
+  v.set("viewportGuides") = std::move(guides);
   // panel visibility (View menu): a user who hides the Toolbar expects it
   // hidden next launch, not resurfaced. While the fullscreen preview hides
   // every panel, persist the PRE-preview layout (the saved*_ set) instead,
@@ -5893,6 +6465,13 @@ void DemoEditor::restoreEditorState() {
     }
     browseKind_ = v.get("browserKind").asInt(0);
     if (browseKind_ < 0 || browseKind_ >= (int)BrowseKind::Count) browseKind_ = 0;
+    const Value guides = v.get("viewportGuides");
+    if (guides.isObj()) {
+      showGrid_ = guides.get("grid").asBool(showGrid_);
+      showAxes_ = guides.get("axes").asBool(showAxes_);
+      showSafeFrame_ = guides.get("safeFrame").asBool(showSafeFrame_);
+      showCrosshair_ = guides.get("crosshair").asBool(showCrosshair_);
+    }
     // panel visibility (View menu): whatever you hid stays hidden next launch
     // (the fullscreen-preview save guard keeps the pre-preview layout, so the
     // file always holds the user's real panel choices)
@@ -6266,6 +6845,15 @@ void DemoEditor::openAssetDialog() {
 }
 
 void DemoEditor::applyQueuedActions() {
+  if (textViewportCommitQueued_) {
+    textViewportCommitQueued_ = false;
+    const std::string nodeName = textViewportEditNode_;
+    if (writeDocument()) {
+      selNode_ = w_.app ? w_.app->editableScene().find(nodeName) : nullptr;
+      showToast("text updated", 2);
+    }
+    textViewportEditNode_.clear();
+  }
   if (sceneAddQueued_) {
     sceneAddQueued_ = false;
     addSceneViaDocument();  // the document op (writes the AST, not raw text)

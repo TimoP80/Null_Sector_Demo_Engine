@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NULL SECTOR // AI Shader Generator</title>
+<meta name="description" content="The standalone AI shader workstation for Null Sector demoscene GLSL effects.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="topbar"><button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button><span class="topbar-title">NULL SECTOR DEMO ENGINE</span></div>
+<div class="shell">
+  <aside id="sidebar" class="sidebar" aria-label="Documentation"></aside>
+  <main id="main" class="content"><div class="main-inner">
+    <header class="pagehead">
+      <p class="eyebrow"><span class="idx">AI</span> Shader Workstation</p>
+      <h1>NULL SECTOR AI SHADER GENERATOR</h1>
+      <p class="lede">Describe a demoscene effect, generate ordinary editable GLSL, compile it through the real Null Sector shader path, iterate with AI or by hand, and export portable shader assets.</p>
+    </header>
+
+    <section>
+      <h2>Launch</h2>
+      <p class="sec-sub">The generator is a separate application; it does not add AI code or editor dependencies to the runtime player.</p>
+      <div class="code" data-lang="bash"><div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">terminal</span><span class="lang">bash</span></div><pre># build the workstation
+cmake -S . -B build -DNS_BUILD_APP=ON
+cmake --build build --config Release --target ns_shader_ai
+
+# open the interactive workstation
+./build/Release/ns_shader_ai.exe
+
+# verify generation, pair compilation, failure recovery, metadata and project IO
+./build/Release/ns_shader_ai.exe --smoke</pre></div>
+      <div class="callout note"><span class="ct-label">Separate target</span><p><code>ns_demo.exe</code> remains runtime-only. <code>ns_editor.exe</code> remains the production editor. The shader workstation reuses the engine's GLSL loader, OpenGL context, fullscreen geometry, VFS mounts and Dear ImGui without becoming part of playback.</p></div>
+    </section>
+
+    <section>
+      <h2>Shadertoy import / converter</h2>
+      <p>The tool converts Shadertoy GLSL &#8212; or a Shadertoy JSON API export &#8212; into a single Null Sector fragment shader with <strong>every channel folded into one file</strong>. Buffer passes become callable <code>vec4</code> functions; texture channels stay <code>sampler2D</code> uniforms (bind at runtime); audio/keyboard channels are stubbed. Uniforms are remapped to the Null Sector set (<code>uResolution</code>, <code>uTime</code>, <code>uBass</code>, &#8230;).</p>
+
+      <h3>Interactive import</h3>
+      <div class="codehilite">
+        <pre>File → Import Shadertoy&#8230;  (or Ctrl+I)
+
+# paste single-pass code, the engine's `// pass:` marker format, or a JSON export
+# click Convert → the result loads into the editor and previews immediately</pre>
+      </div>
+
+      <h3>Headless conversion (<code>--convert-shadertoy</code>)</h3>
+      <p class="sec-sub">The same conversion runs without a window or GL context, so it slots into build scripts and CI. The <code>--smoke</code> self-test covers it headlessly: generation, pair compile, failure recovery, multi-pass folding, JSON export parsing and a compile of the converted output.</p>
+      <div class="code" data-lang="bash">
+        <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">terminal</span><span class="lang">bash</span></div>
+        <pre># single-pass: data/shadertoy/plasma.glsl
+./build/Release/ns_shader_ai.exe --convert-shadertoy=data/shadertoy/plasma.glsl --out=plasma.frag
+
+# multi-pass (shipped example: common + buffer_a + buffer_b + image)
+./build/Release/ns_shader_ai.exe --convert-shadertoy=data/shadertoy/multipass_example.glsl --out=multipass_example.frag
+
+# Shadertoy JSON API export (renderpass[] code + names)
+./build/Release/ns_shader_ai.exe --convert-shadertoy=shadertoy_export.json --out=shadertoy_export.frag</pre>
+      </div>
+      <ul>
+        <li><code>--out=FILE</code> is optional &#8212; it defaults to the input path plus <code>.frag</code>.</li>
+        <li>Exit code 0 on success; 1 on failure (unreadable input, or JSON that is not a Shadertoy export).</li>
+        <li>The emitted file starts with <code>#version 300 es</code>; the engine's loader rewrites it to desktop 330 core, so the result compiles and renders through the normal <code>shader</code> scene path or Shader Lab without further work.</li>
+      </ul>
+
+      <h4>Input formats</h4>
+      <ul>
+        <li><strong>Single-pass GLSL</strong> &#8212; the whole file is the image pass.</li>
+        <li><strong>Multi-pass with <code>// pass:</code> markers</strong> &#8212; <code>common</code> (header helpers), <code>buffer_a&#8230;buffer_d</code>, <code>image</code>; channel defaults and overrides are described under Channel wiring below. See <a href="shadertoy.html#multi-pass">Shadertoy Import</a> for the full marker rules.</li>
+        <li><strong>Shadertoy JSON API export</strong> &#8212; <code>{"Shader": {"renderpass": [...]}}</code> (the array-wrapped bulk form and a top-level <code>renderpass</code> are accepted too). Each pass's <code>code</code> is extracted and its <code>name</code> is mapped onto a pass marker, case-insensitively so localized names degrade gracefully:</li>
+      </ul>
+      <div class="tbl-wrap">
+        <table class="tbl">
+          <thead><tr><th>renderpass name</th><th>becomes</th></tr></thead>
+          <tbody>
+            <tr><td><code>Common</code></td><td><code>// pass: common</code></td></tr>
+            <tr><td><code>Buffer A</code> &#8230; <code>Buffer D</code></td><td><code>// pass: buffer_a</code> &#8230; <code>buffer_d</code></td></tr>
+            <tr><td><code>Image</code></td><td><code>// pass: image</code></td></tr>
+            <tr><td><code>Sound</code> / <code>Cube A&#8230;D</code> / unknown</td><td>skipped, with a note</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="sec-sub">JSON that parses but has no <code>renderpass</code> array fails with <code>JSON input is not a Shadertoy export (no renderpass array)</code> instead of emitting broken GLSL. Each renderpass&#8217;s <code>inputs</code> array is mapped to channel wiring (texture/cube/video inputs become bindable samplers, <code>buffer</code> inputs fold to the matching buffer pass, <code>audio</code>/<code>keyboard</code> are stubbed); unwired channels follow the engine convention below.</p>
+
+      <h4>What the output looks like</h4>
+      <div class="code" data-lang="bash">
+        <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">stderr from both input kinds</span><span class="lang">log</span></div>
+        <pre>$ ns_shader_ai.exe --convert-shadertoy=data/shadertoy/multipass_example.glsl --out=multipass_example.frag
+[SHADER-AI] Converted data/shadertoy/multipass_example.glsl
+  Output: multipass_example.frag  (3365 bytes, 2 buffer(s) folded)
+  Note: channel iChannel1 is audio - replaced with vec4(0.0)
+  Note: channel iChannel2 is keyboard - replaced with vec4(0.0)
+
+$ ns_shader_ai.exe --convert-shadertoy=shadertoy_export.json --out=out.frag
+[SHADER-AI] Converted shadertoy_export.json
+  Output: out.frag  (2821 bytes, 2 buffer(s) folded)
+  Note: skipped renderpass 'Sound' (not a fragment pass)
+  Note: parsed as a Shadertoy JSON API export (4 fragment pass(es), 1 skipped)
+  Note: API export inputs are mapped to channel wiring when present; unwired
+        channels follow the engine chain convention or are inferred as bindable
+        texture samplers</pre>
+      </div>
+      <p class="sec-sub">Inside the file: a header comment lists the folded buffers and any sampler channels to bind at runtime; the standard uniform shim (<code>uResolution</code>, <code>uTime</code>, <code>uBass</code>, &#8230;) plus the <code>i*</code> compatibility defines is emitted; each buffer pass becomes a <code>st_&lt;name&gt;</code> <code>vec4</code> function with its helper functions name-prefixed so passes cannot collide; and a <code>main()</code> wrapper calls the image pass. The emitted <code>.frag</code> is an ordinary shader asset &#8212; reference it from a production with <code>shader out.frag</code>.</p>
+
+      <h3>Channel wiring</h3>
+      <p>For a single-pass file, <code>texture(iChannel0, &#8230;)</code> stays a <code>uChannel0</code> sampler uniform. For multi-pass <code>// pass:</code> files, the engine convention is used:</p>
+      <ul>
+        <li><code>buffer_a</code> → <code>st_buffer_a</code> (folded function); its <code>iChannel0</code> = external texture (sampler).</li>
+        <li>Subsequent buffers reference the previous one via function call.</li>
+        <li>The image pass sees the last buffer as <code>iChannel0</code> (folded) and <code>iChannel1</code> as the live scene (sampler).</li>
+      </ul>
+      <p>Override wiring per-pass with:</p>
+      <div class="codehilite">
+        <pre>// channel: iChannel0 = buffer_a
+// channel: iChannel1 = texture:data/textures/noise.png
+// channel: iChannel2 = audio
+// channel: iChannel3 = keyboard</pre>
+      </div>
+      <p><strong>Standard Shadertoy exports</strong> use <code>#iChannelN "spec"</code> lines instead (URLs, file names, or the keywords <code>audio</code>/<code>keyboard</code>/<code>none</code>). Those are parsed per pass, removed from the emitted source, and wired the same way: texture specs become <code>uChannelN</code> samplers listed as bind notes (so the generator can auto-probe local files from <code>data/textures/</code> or let you load them manually). Multi-channel shaders that sample <code>iChannel0..3</code> without any channel comment are also handled &#8212; every sampled-but-unwired channel is inferred as a bindable texture sampler instead of silently reading black, which is the common case for code pasted from the Shadertoy editor where textures live in the UI.</p>
+      <p><strong>Previewing in the generator.</strong> Converted sampler channels bind through the <strong>Texture Channels</strong> section of the editor. Each <code>uChannelN</code> the fragment uses gets a <em>Load&#8230;</em> button (PNG/JPG/BMP/TGA/GIF, flipped to match Shadertoy&#8217;s bottom-left UV origin) and a <em>Clear</em> button. Files named by the source (<code>// channel: iChannelN = texture:&#8230;</code>) are auto-probed from <code>data/textures/</code> on import, and <strong>https:// texture URLs are downloaded automatically</strong> &#8212; the fetch runs on a background thread, the image is cached in <code>data/textures/</code> (so re-imports bind instantly), and it is bound to the channel the moment the download lands. Shadertoy API asset paths (<code>/media/&#8230;</code>, <code>/presets/&#8230;</code>) resolve against <code>www.shadertoy.com</code>. While a fetch is in flight the channel shows a live progress bar with the downloaded/expected size (when the server sends <code>Content-Length</code>; otherwise a running byte counter), and a <em>Cancel downloads</em> button stops the whole batch at the next safe point &#8212; partial <code>.part</code> files are discarded and every affected channel returns to the unbound default. Transient failures (timeouts, transport errors, HTTP 5xx) are <strong>retried automatically with a short backoff</strong> before a channel is marked failed; HTTP 4xx responses are treated as permanent and not retried. While a retry is waiting or fetching, the row shows the active attempt (<code>retrying 2/3&#8230;</code>), and the attempt count plus base backoff are tunable in <strong>Provider settings</strong> (<em>Retry attempts</em>, <em>Retry backoff (ms)</em>, saved with the rest of the settings file). Only after retries are exhausted does the channel show the error with a <em>Retry</em> button (which re-downloads, discarding any corrupt cached file) and a <em>Load&#8230;</em> fallback to pick a local image instead. The same fetch is available headlessly via <code>ns_shader_ai.exe --download-url=URL</code> (it runs the same retry pipeline, with <code>--retry-attempts=N</code> and <code>--retry-backoff-ms=M</code> to tune it). Channel URLs are persisted in the project (<code>.nsshad</code>): reopening a project binds channels from the cached files, and if a cache file was deleted, the texture is re-downloaded from its stored URL automatically. Unbound channels render as tileable neutral noise &#8212; the same thing most Shadertoy shaders expect from <code>iChannel0</code> &#8212; instead of the old 2&#215;2 checkerboard placeholder that made every channel-using import preview as a giant checkerboard. Loaded channel images are saved with the project (<code>.nsshad</code>).</p>
+
+      <h3>Limitations</h3>
+      <ul>
+        <li>Buffer passes are folded at the image resolution (buffer&#8217;s own <code>iResolution</code> is approximated).</li>
+        <li><code>textureLod</code> and bias arguments are dropped during folding.</li>
+        <li>Audio and keyboard channels are replaced with <code>vec4(0.0)</code>.</li>
+        <li>Texture channels cannot be embedded in plain GLSL; the converter lists them as &#8220;bind&#8221; notes.</li>
+        <li>JSON exports: per-pass <code>inputs</code> are mapped (texture/cube/video → sampler, buffer → folded call, audio/keyboard → stub). <code>outputs</code> are not modelled &#8212; a pass that feeds more than one downstream pass is folded once and called by name.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Core workflow</h2>
+      <ol>
+        <li>Write or choose a prompt describing the visual, motion, palette, procedural technique and audio response.</li>
+        <li>Select <strong>Fragment Shader</strong>, <strong>Vertex Shader</strong>, or <strong>Vertex + Fragment</strong>.</li>
+        <li>Press <strong>Generate Shader</strong>. The offline built-in provider creates a working starting point immediately.</li>
+        <li>Watch the real 16:9 OpenGL preview compile. The last valid program remains visible if a later edit fails; use <strong>Refresh view</strong> or <kbd>F5</kbd> to reset and redraw it immediately.</li>
+        <li>Adjust metadata parameters, simulated audio, preview speed and resolution, or edit the GLSL source directly. Load a real audio file for FFT reactivity; Play/Pause and <kbd>Space</kbd> stop and resume the preview clock together with that audio.</li>
+        <li>Use <strong>Ask AI to Fix</strong> after a compile failure, restore a previous generation from history, then save the shader or project.</li>
+      </ol>
+      <p>Generation history stores prior source versions in memory and project files store the prompt, specification, source, preview settings and history. API keys are never written into project files; provider credentials can be saved separately from the Settings panel.</p>
+    </section>
+
+    <section>
+      <h2>Null Sector compatibility mode</h2>
+      <p class="sec-sub">Generated source uses the same ordinary uniform names understood by the engine and Shader Lab. The loader preprocesses <code>#version 300 es</code> for the desktop OpenGL path.</p>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Uniform group</th><th>Names</th><th>Typical use</th></tr></thead><tbody>
+        <tr><td>Clock</td><td><code>uTime</code>, <code>uBPM</code>, <code>uBeat</code>, <code>uBar</code>, <code>uBeatPhase</code></td><td>Continuous motion, bar palette changes and beat-synced animation.</td></tr>
+        <tr><td>Audio</td><td><code>uAudioLevel</code>, <code>uBass</code>, <code>uMid</code>, <code>uTreble</code>, <code>uKick</code>, <code>uSnare</code></td><td>Deformation, brightness, glitches and impact pulses.</td></tr>
+        <tr><td>Appearance</td><td><code>uColor</code>, <code>uColor2</code>, <code>uIntensity</code>, <code>uSpeed</code>, <code>uScale</code></td><td>Shared production controls and palette/intensity mapping.</td></tr>
+        <tr><td>Geometry</td><td><code>uResolution</code>, <code>vUV</code>, <code>aPos</code>, <code>aUV</code></td><td>Fullscreen fragment effects and combined vertex/fragment pairs.</td></tr>
+      </tbody></table></div>
+      <div class="callout warn"><span class="ct-label">Portable GLSL</span><p>Do not depend on undocumented engine functions. Generated source should use GLSL built-ins and the listed uniforms. The exported <code>.frag</code> and <code>.vert</code> files remain ordinary assets that can be opened in Shader Lab.</p></div>
+    </section>
+
+    <section>
+      <h2>Metadata-driven parameters</h2>
+      <p>Put declarations above the shader code. The workstation parses them and creates live controls in the Parameters panel.</p>
+      <div class="code" data-lang="glsl"><div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">effect.frag</span><span class="lang">glsl</span></div><pre>// @param glow float 0.0 8.0 2.0
+// @param distortion float 0.0 1.0 0.12
+// @param steps int 8 96 48
+// @param enabled bool true
+// @param color color #00d9ff
+// @param direction vec2 1.0 0.0
+
+uniform float glow;
+uniform float distortion;</pre></div>
+      <p>Supported types are <code>float</code>, <code>int</code>, <code>bool</code>, <code>color</code>, <code>vec2</code>, <code>vec3</code> and <code>vec4</code>. Use <strong>Reset parameters</strong> to return to metadata defaults.</p>
+    </section>
+
+    <section>
+      <h2>Audio and performance</h2>
+      <p>Without a track, the simulated audio sliders let you audition bass, mid, treble, kick, snare and overall level. With <strong>Load audio...</strong>, the existing engine audio analyser drives the same uniform values and displays the loaded track path. Loading audio is isolated from shader document state: the current fragment/vertex source and editor buffers are preserved, and a failed decode keeps the previous source.</p>
+      <p>The Performance panel reports lightweight source heuristics: approximate ALU size, texture call count, loop count and whether the source looks raymarch-like. Treat this as an early warning, not a benchmark. Ask the AI to optimize for a GTX 1070, then verify the result in the target production.</p>
+      <ul><li>Prefer bounded loops and reuse calculated values.</li><li>Avoid unnecessary per-pixel texture reads and deeply nested FBM.</li><li>Keep raymarch iteration counts explicit and moderate.</li><li>Use the engine's production validation and shader preflight before shipping.</li></ul>
+    </section>
+
+    <section>
+      <h2>Providers and repair</h2>
+      <p>The default <strong>Built-in Demoscene AI</strong> is deterministic and offline. It provides prompt-sensitive templates for tunnels, CRT effects, bounded SDF-inspired scenes, glitch effects and plasma, which makes the tool useful without network credentials.</p>
+      <p>The provider abstraction also supports OpenAI-compatible Chat Completions and Responses endpoints. Configure provider, endpoint, API key, temperature, maximum tokens, and <strong>Request timeout (seconds)</strong> under <strong>View → Settings</strong>. The timeout defaults to 600 seconds and can be raised for reasoning models such as gpt-5 or o-series models that may think for several minutes before returning a non-streaming response. Press <strong>Refresh available models</strong> to query the provider's <code>/models</code> endpoint, then choose the returned model from the selector. Use <strong>Save settings</strong> to persist the provider configuration; on Windows the API key is protected with the current user's DPAPI credentials and is never written into <code>.nsshad</code> project files. Network generation is opt-in; the application never requires a provider for local generation.</p>
+      <p>When compilation fails, the previous valid preview is retained. Diagnostics are shown with parsed line/column entries where the driver provides them. <strong>Ask AI to Fix</strong> sends the current source and diagnostic text to the selected provider and applies the returned source only after the normal compile step.</p>
+      <div class="callout danger"><span class="ct-label">401 / timeout errors</span><p>For 401 errors, paste the complete active project key from the OpenAI dashboard without quotes or a <code>Bearer </code> prefix. The workstation trims surrounding whitespace, quotes and an accidental Bearer prefix before sending the header. For WinHTTP error <code>12002</code>, the request timed out before the provider responded; raise <strong>Request timeout (seconds)</strong>, especially for reasoning models, then retry. Confirm the endpoint and key belong to the same OpenAI project, then refresh available models again.</p></div>
+    </section>
+
+    <section>
+      <h2>Export and integration</h2>
+      <ul>
+        <li><strong>File → Save Shader As...</strong> writes the fragment source and, for pairs, a sibling <code>.vert</code> file.</li>
+        <li><strong>File → Save Project</strong> writes a <code>.nsshad</code> companion project with source, prompt, settings and history.</li>
+        <li><strong>File → Copy GLSL</strong> copies the current fragment source.</li>
+        <li><strong>File → Copy NSD snippet</strong> copies a minimal shader reference for a production script.</li>
+      </ul>
+      <div class="code" data-lang="nsd"><div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/my_show.nsd</span><span class="lang">nsd</span></div><pre>scene Generated { camera ShaderCam { rig static; pos (0,0,3); fov 55 } }
+at 0 { shader generated_effect.frag; show Generated }</pre></div>
+      <div class="callout tip"><span class="ct-label">Shader Lab handoff</span><p>Exported files are portable GLSL assets. Copy them into the project's shader directory, validate with <code>ns_demo.exe --check-shaders</code>, then open or reference them from the existing editor/Shader Lab workflow.</p></div>
+    </section>
+
+    <nav id="pager" class="pager" aria-label="Next page"></nav>
+  </div></main>
+</div>
+<script src="docs.js"></script>
+</body>
+</html>

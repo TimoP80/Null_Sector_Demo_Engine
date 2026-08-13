@@ -6,6 +6,8 @@
 #                scene graph, animation, json, assets, file watcher, rigs)
 #   ns_fw_tests  unit tests for the framework core (no GL needed)
 #   ns_demo      the demo app (engine + effects + DemoApp + GLFW)
+#   ns_editor    standalone editor application using the same DemoEditor/runtime
+#   ns_shader_ai standalone AI-assisted GLSL generation and preview workstation
 #
 # Options:
 #   -DNS_BUILD_APP=OFF   build only the framework + tests (no GLFW needed)
@@ -53,6 +55,7 @@ add_library(ns_framework STATIC
   src/framework/vfs/miniz/miniz.c
   src/framework/vfs/miniz/miniz_tdef.c
   src/framework/vfs/miniz/miniz_tinfl.c
+  src/shadertoy_convert.cpp
 )
 set_source_files_properties(
   src/framework/vfs/miniz/miniz.c
@@ -116,8 +119,10 @@ if(NS_BUILD_APP)
     target_compile_options(imgui PRIVATE -w)
   endif()
 
-  add_executable(ns_demo
-    src/main.cpp
+  # Runtime sources shared by the player and standalone editor. Keep editor
+  # implementation files out of ns_demo so the distributed player contains
+  # only playback, rendering, packaging, and runtime asset functionality.
+  set(NS_RUNTIME_SOURCES
     # engine (low-level GL layer)
     src/engine/assets.cpp
     src/engine/audio.cpp
@@ -127,6 +132,7 @@ if(NS_BUILD_APP)
     src/engine/shader.cpp
     src/engine/shadercheck.cpp
     src/engine/ubo.cpp
+    src/engine/video.cpp
     # effects (registered content)
     src/effects/greetings.cpp
     src/effects/intro.cpp
@@ -146,7 +152,9 @@ if(NS_BUILD_APP)
     src/app/shadertoy.cpp
     src/app/shadertoycheck.cpp
     src/app/demoapp.cpp
-    # editor (dockable ImGui shell)
+  )
+
+  set(NS_EDITOR_SOURCES
     src/editor/editor.cpp
     src/editor/document.cpp
     src/editor/editor_document.cpp
@@ -157,17 +165,51 @@ if(NS_BUILD_APP)
     src/editor/exportmp4.cpp
     src/editor/shaderlab.cpp
   )
-  target_include_directories(ns_demo PRIVATE third_party)
-  target_link_libraries(ns_demo PRIVATE ns_framework glfw imgui)
-  target_compile_definitions(ns_demo PRIVATE
+
+  # The standalone editor reuses the same runtime sources and adds only the
+  # authoring layer. ns_demo is deliberately runtime-only.
+  add_executable(ns_demo src/main.cpp ${NS_RUNTIME_SOURCES})
+  add_executable(ns_editor src/main.cpp src/editor_main.cpp ${NS_RUNTIME_SOURCES} ${NS_EDITOR_SOURCES})
+
+  foreach(target ns_demo ns_editor)
+    target_include_directories(${target} PRIVATE third_party)
+    target_link_libraries(${target} PRIVATE ns_framework glfw)
+    target_compile_definitions(${target} PRIVATE
+      NULLSECTOR_SHADER_DIR="${NS_SHADER_DIR}"
+      NULLSECTOR_ASSET_DIR="${NS_ASSET_DIR}"
+      NULLSECTOR_DATA_DIR="${NS_DATA_DIR}"
+    )
+    if(WIN32)
+      target_link_libraries(${target} PRIVATE opengl32 comdlg32)
+    elseif(UNIX AND NOT APPLE)
+      find_package(X11 QUIET)
+      target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+  endforeach()
+  target_link_libraries(ns_editor PRIVATE imgui)
+  target_compile_definitions(ns_demo PRIVATE NULLSECTOR_RUNTIME_ONLY=1)
+  target_compile_definitions(ns_editor PRIVATE NULLSECTOR_STANDALONE_EDITOR=1)
+
+  # Standalone AI shader workstation. It reuses the real engine Shader/VFS
+  # path and Dear ImGui, but is intentionally separate from both playback and
+  # the production editor.
+  add_executable(ns_shader_ai
+    src/shader_ai_main.cpp
+    src/shader_ai.cpp
+    src/engine/audio.cpp
+    src/engine/gl.cpp
+    src/engine/shader.cpp
+  )
+  target_include_directories(ns_shader_ai PRIVATE third_party)
+  target_link_libraries(ns_shader_ai PRIVATE ns_framework glfw imgui)
+  target_compile_definitions(ns_shader_ai PRIVATE
     NULLSECTOR_SHADER_DIR="${NS_SHADER_DIR}"
     NULLSECTOR_ASSET_DIR="${NS_ASSET_DIR}"
     NULLSECTOR_DATA_DIR="${NS_DATA_DIR}"
   )
   if(WIN32)
-    target_link_libraries(ns_demo PRIVATE opengl32 comdlg32)
+    target_link_libraries(ns_shader_ai PRIVATE opengl32 comdlg32 winhttp crypt32)
   elseif(UNIX AND NOT APPLE)
-    find_package(X11 QUIET)
-    target_link_libraries(ns_demo PRIVATE ${CMAKE_DL_LIBS})
+    target_link_libraries(ns_shader_ai PRIVATE ${CMAKE_DL_LIBS})
   endif()
 endif()

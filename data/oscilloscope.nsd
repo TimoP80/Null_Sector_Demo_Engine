@@ -1,0 +1,15 @@
+demo "NEW NULL SECTOR PROJECT" {
+    bpm 118.5
+    duration 16
+}
+
+scene Intro {
+    bars 8  intensity 0.35
+    title "First Signal"
+    camera MainCam { rig static; pos (0,0,2); target (0,0,0); fov 55 }
+    shader audioreactive_oscilloscope
+    fade in 1
+    at 7 { transition fade 1 }
+}
+
+at 0 { show Intro; marker FirstSignal }

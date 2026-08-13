@@ -73,6 +73,7 @@ const char* nodeTypeName(NodeType t) {
     case NodeType::Particles: return "particles";
     case NodeType::Quad: return "quad";
     case NodeType::Sprite: return "sprite";
+    case NodeType::Video: return "video";
     case NodeType::Text: return "text";
     case NodeType::Post: return "post";
     case NodeType::TimelineSystem: return "timeline";
@@ -87,6 +88,7 @@ NodeType nodeTypeFromName(const std::string& n) {
   if (n == "particles") return NodeType::Particles;
   if (n == "quad") return NodeType::Quad;
   if (n == "sprite") return NodeType::Sprite;
+  if (n == "video") return NodeType::Video;
   if (n == "text") return NodeType::Text;
   if (n == "post") return NodeType::Post;
   if (n == "timeline") return NodeType::TimelineSystem;
@@ -181,6 +183,7 @@ NS_ACCESSOR(mesh, asMesh, MeshData)
 NS_ACCESSOR(particles, asParticles, ParticleData)
 NS_ACCESSOR(quad, asQuad, QuadData)
 NS_ACCESSOR(sprite, asSprite, SpriteData)
+NS_ACCESSOR(video, asVideo, VideoData)
 NS_ACCESSOR(text, asText, TextData)
 NS_ACCESSOR(post, asPost, PostData)
 NS_ACCESSOR(timeline, asTimeline, TimelineData)
@@ -289,6 +292,19 @@ void SceneNode::toJsonInto(Value& o) const {
       p.set("opacity") = Value((double)d.opacity);
       p.set("size") = vecToJson(d.size);
       o.set("sprite") = std::move(p);
+      break;
+    }
+    case NodeType::Video: {
+      const VideoData& d = std::get<VideoData>(payload);
+      Value p = Value::object();
+      p.set("file") = Value(d.file);
+      p.set("width") = Value(d.width);
+      p.set("height") = Value(d.height);
+      p.set("fps") = Value((double)d.fps);
+      p.set("loop") = Value(d.loop);
+      p.set("opacity") = Value((double)d.opacity);
+      p.set("size") = vecToJson(d.size);
+      o.set("video") = std::move(p);
       break;
     }
     case NodeType::Text: {
@@ -414,6 +430,20 @@ std::unique_ptr<SceneNode> SceneNode::fromJson(const Value& v) {
       d.tex = p.get("tex").asStr();
       d.color = jsonToVec4(p.get("color"));
       d.opacity = (float)p.get("opacity").asNum(1);
+      d.size = jsonToVec3(p.get("size"));
+      if (d.size[0] == 0 && d.size[1] == 0 && d.size[2] == 0) d.size = {1, 1, 1};
+      node->payload = d;
+      break;
+    }
+    case NodeType::Video: {
+      const Value& p = v.get("video");
+      VideoData d;
+      d.file = p.get("file").asStr();
+      d.width = p.get("width").asInt(1280);
+      d.height = p.get("height").asInt(720);
+      d.fps = p.get("fps").asFloat(30.0f);
+      d.loop = p.get("loop").asBool(true);
+      d.opacity = p.get("opacity").asFloat(1.0f);
       d.size = jsonToVec3(p.get("size"));
       if (d.size[0] == 0 && d.size[1] == 0 && d.size[2] == 0) d.size = {1, 1, 1};
       node->payload = d;

@@ -86,6 +86,10 @@ private:
   FrameTarget viewport_;     // blit target for the live preview
   double last_ = 0;
   bool stepPending_ = false;
+  // UI input is processed after the engine has rendered the current frame.
+  // A seek therefore needs one explicit same-frame refresh; otherwise the
+  // viewport shows the pre-scrub frame until the next editor tick.
+  bool seekPreviewPending_ = false;
   bool layoutBuilt_ = false;
   bool uiUp_ = false;        // ImGui context created (shutdown is idempotent)
   bool uiFontLoaded_ = false;
@@ -126,6 +130,10 @@ private:
   // every frame, which could drop edits while the field was still focused.
   std::vector<char> textEditBuf_ = std::vector<char>(4096, '\0');
   std::string textEditNodeKey_;
+  bool textViewportEditing_ = false;
+  bool textViewportChanged_ = false;
+  bool textViewportCommitQueued_ = false;
+  std::string textViewportEditNode_;
   std::vector<char> textFontEditBuf_ = std::vector<char>(512, '\0');
   std::string textFontEditNodeKey_;
 
@@ -149,6 +157,15 @@ private:
   // Fit button) can restore it. fitZoom_ < 0 means no saved view.
   float tlFitZoom_ = -1.0f;
   float tlFitT0_ = 0.0f;
+  bool timelinePanning_ = false;
+  float timelinePanStartX_ = 0.0f;
+  float timelinePanStartT0_ = 0.0f;
+  std::string selectedTimelineEvent_;
+  bool timelineEventDragging_ = false;
+  bool timelineEventMoved_ = false;
+  float timelineEventDragT0_ = 0.0f;
+  void deleteSelectedTimelineEvent();
+  void duplicateSelectedTimelineEvent();
 
   // --- viewport input forwarding / fly camera --------------------------------
   bool viewportFocused_ = false;   // viewport clicked (transport "belongs" to it)
@@ -166,6 +183,13 @@ private:
   bool flyMousePrimed_ = false;
   GLFWcursorposfun previousCursorPos_ = nullptr;
   bool flySpacePrev_ = false;      // edge-triggered pause while flying
+  bool showGrid_ = false;
+  bool showAxes_ = false;
+  bool showSafeFrame_ = false;
+  bool showCrosshair_ = false;
+  bool viewportFocusLock_ = false;
+  V3 viewportFocusPos_{0, 0, 0};
+  Q4 viewportFocusQuat_{0, 0, 0, 1};
 
   // programmatic fly smoke (NS_EDITOR_FLY_SMOKE=1 + --editor-seconds=N):
   // enter the fly camera, move it, exit - CI proof of the capture/override path
@@ -226,12 +250,15 @@ private:
   // Browse... actions use the platform picker on Windows, with the existing
   // in-editor browser retained as a cross-platform fallback. Roots + picks
   // are stored as absolute paths, consistent with the persisted track.
-  enum class BrowseKind : int { Audio, Texture, Shader, Model, Script, Count };
+  // Video is appended to preserve persisted integer category values from
+  // older editor_state.json files (where Script was index 4).
+  enum class BrowseKind : int { Audio, Texture, Shader, Model, Script, Video, Count };
   struct AssetBrowse {
     bool scanned = false;   // listed once per kind (Rescan forces it)
     char root[512] = "";    // scan root; empty = kind defaults
     std::vector<std::string> files;
     std::string sel;        // last clicked entry (Open applies it)
+    char filter[160] = ""; // live filename/path filter
     double scanT = 0;       // last-scan timestamp (auto-refresh cadence)
     float scanMs = 0;       // last scan duration (cadence scales to it)
     double flashT = -1e9;   // last detected change ("updated" flash)
@@ -381,6 +408,7 @@ private:
   void openShaderScratch(const std::string& path);
   /** add a .frag shader command to the selected/current scene and preview it */
   void addShaderToScene(const std::string& path);
+  void addVideoToScene(const std::string& path);
   void drawScratch();
   bool loadScratchSource(const std::string& path);  // fills src + edit buffer
   void saveScratch();             // write the buffer back + poke a reload
@@ -547,6 +575,9 @@ private:
   void enterFly();
   void exitFly();
   void toggleFly();
+  void frameViewportSelection(bool allVisible);
+  void applyViewportFocus();
+  void createCameraFromView();
 
   // queued authoring ops (frame start, before the engine step)
   void applyQueuedActions();
@@ -608,7 +639,11 @@ private:
   void inspectNode(SceneNode* n);
   void inspectEffect(Effect* e);
   void seekTo(float t);
+  /** consume a UI seek after panels have handled input and redraw the engine
+   *  preview before ImGui presents it, so scrubbing is not one frame behind */
+  void refreshSeekPreview();
   void fitTimeline();
+  float timelineContentDuration() const;
   // per-show timeline view (data/editor_state.json "timelineViews"): every
   // show script remembers its zoom/scroll/fit window - restored at boot and
   // when switching shows, written on view changes and script switches

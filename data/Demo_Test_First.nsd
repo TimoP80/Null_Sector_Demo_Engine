@@ -1,0 +1,16 @@
+demo "NEW NULL SECTOR PROJECT" {
+    bpm 120
+    duration 16
+}
+
+scene Intro {
+    bars 8  intensity 0.231
+    title "First Signal"
+    camera MainCam { rig static; pos (0,0,2); target (0,0,0); fov 55 }
+    text title { text Tesents; pos (-0.1166563,0.46992862,0); size 54; style neon }
+    fade in 1
+    at 7 { transition fade 1 }
+}
+
+at 0 { show Intro; marker FirstSignal }
+at 3.8996277 { shader shaderlab_glitch.frag { useFont true; text shaderlab } }

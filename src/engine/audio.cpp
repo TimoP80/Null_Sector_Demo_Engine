@@ -334,22 +334,35 @@ AudioEngine::Decoded AudioEngine::decodeFile(const std::string& path,
 }
 
 void AudioEngine::loadTrack(const std::string& path) {
-  trackPath_ = path;
-  trackMode = false;
-
+  // Decode before touching the live source. A failed load must not clear an
+  // already loaded track (or make the UI lose its audio state).
   // startup path (--track= / auto-find): decode on the caller's thread via
   // the same serialized decodeFile the async worker uses (see gDecodeMtx).
   Decoded d = decodeFile(path, cancelWorker_);
-  if (!d.ok) return;  // decode already printed the reason; keep silence
+  if (!d.ok) return;  // decode already printed the reason; keep the old source
 
+  // If this is a runtime load, stop the callback before moving the decoded
+  // buffer in front of it. Initial startup has no device yet, so this is a
+  // no-op there.
+  if (device_) ma_device_stop(device_);
+  deviceLive_ = false;
   trackData_ = std::move(d.data);
   trackFrames_ = d.frames;
   trackChannels_ = 2;
+  trackPath_ = path;
   trackPos_ = 0;
   trackMode = true;
   trackDuration = (float)((double)trackFrames_ / (double)sampleRate_);
   std::printf("[AUDIO] track loaded: %s (%.2fs, %u Hz stereo f32)\n",
               path.c_str(), trackDuration, sampleRate_);
+
+  // A runtime replacement resumes only if playback was already active. The
+  // initial caller still invokes start() after loadTrack(), which prepares the
+  // analyser before opening the device.
+  if (started && !paused_) {
+    if (device_) deviceLive_ = ma_device_start(device_) == MA_SUCCESS;
+    else deviceLive_ = startDevice();
+  }
 }
 
 bool AudioEngine::swapTrack(const std::string& path, float seekSec) {
@@ -452,14 +465,18 @@ void AudioEngine::applyReady(const std::string& path, float seekSec) {
     trackDuration = (float)((double)trackFrames_ / (double)sampleRate_);
     std::printf("[AUDIO] track loaded: %s (%.2fs, %u Hz stereo f32)\n",
                 path.c_str(), trackDuration, sampleRate_);
-    if (device_) {
-      // resume the paused device with the new buffer
-      ma_device_start(device_);
-      deviceLive_ = true;
-    } else if (startDevice()) {
-      // the engine booted silent (no track -> no device): open one now so
-      // the committed track is actually heard
-      deviceLive_ = true;
+    if (started && !paused_) {
+      if (device_) {
+        // resume the device with the new buffer
+        deviceLive_ = ma_device_start(device_) == MA_SUCCESS;
+      } else if (startDevice()) {
+        // the engine booted silent (no track -> no device): open one now so
+        // the committed track is actually heard
+        deviceLive_ = true;
+      }
+    } else {
+      // Loading while paused updates the source but must not start playback.
+      deviceLive_ = false;
     }
   }
   if (seekSec > 0) {
@@ -554,6 +571,8 @@ void AudioEngine::start() {
   started = true;
   lastWall_ = 0;  // prime update()'s wall clock on the first frame
   prepareAnalyser();
+  if (paused_) return;  // allow setPlaying(false) before the first start()
+
   if (!trackMode) {
     // no track file: the show runs silent, and no device is opened. The show
     // clock then depends on update() being polled every frame (its wall-clock
@@ -567,6 +586,31 @@ void AudioEngine::start() {
   // fails the show clock + visuals keep running on the wall clock via
   // update() instead (silent fallback).
   if (startDevice()) deviceLive_ = true;
+}
+
+void AudioEngine::setPlaying(bool playing) {
+  if (!playing) {
+    paused_ = true;
+    lastWall_ = 0;
+    if (device_) ma_device_stop(device_);
+    deviceLive_ = false;
+    return;
+  }
+
+  if (!started) {
+    paused_ = false;
+    start();
+    return;
+  }
+  if (!paused_) return;
+  paused_ = false;
+  lastWall_ = 0;
+  lastCursor_ = frameCursor_.load();
+  stallFrames_ = 0;
+  if (trackMode) {
+    if (device_) deviceLive_ = ma_device_start(device_) == MA_SUCCESS;
+    else deviceLive_ = startDevice();
+  }
 }
 
 float AudioEngine::now() const {
@@ -620,6 +664,7 @@ bool AudioEngine::selfTest() {
 }
 
 void AudioEngine::update() {
+  if (paused_) return;
   // A live playback device drives the show clock + analyser from its data
   // callback on the audio thread, so update() is a no-op in that mode. It is
   // only the fallback when no device could be opened (or the show runs

@@ -73,6 +73,12 @@ void collectCmdRefs(const Cmd& c, std::vector<PackRef>& out) {
     if (!font.empty())
       out.push_back({font.find('/') == std::string::npos ? "assets/fonts/" + font : font,
                      "font"});
+  } else if (c.name == "video") {
+    std::string file = c.s("file", c.args.empty() ? "" : c.args[0].asStr());
+    if (!file.empty()) {
+      const std::string path = file.rfind("data/", 0) == 0 ? file : "data/video/" + file;
+      out.push_back({path, "video"});
+    }
   } else if (c.name == "sprite" || c.name == "image") {
     std::string tex = c.s("tex");
     if (tex.empty()) {
@@ -126,7 +132,7 @@ bool shouldCompress(const std::string& v) {
   static const std::set<std::string> incompressible = {
       ".mp3",  ".ogg",  ".flac", ".wav", ".aiff", ".png", ".jpg", ".jpeg",
       ".bmp",  ".tga",  ".gif",  ".webp", ".zip", ".gz",  ".7z",  ".rar",
-      ".nsp",  ".exe",  ".dll",  ".so",  ".dylib"};
+      ".nsp",  ".exe",  ".dll",  ".so",  ".dylib", ".mp4", ".mkv", ".webm", ".mov"};
   return incompressible.count(ext) == 0;
 }
 
@@ -284,7 +290,7 @@ int runProductionPacker(const std::string& rootDir, const std::string& scriptArg
   if (!audioVpath.empty())
     std::fprintf(stderr, "Audio:      %s\n", audioVpath.c_str());
   std::fprintf(stderr, "\nAssets:\n");
-  const char* order[] = {"shader", "shadertoy", "texture", "model", "material",
+  const char* order[] = {"shader", "shadertoy", "texture", "model", "video", "material",
                          "post",   "font",      "audio",   "script", "other"};
   for (const char* k : order) {
     auto it = kinds.find(k);

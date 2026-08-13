@@ -48,6 +48,9 @@ public:
   /** true once the user pressed Insert into Timeline; the editor consumes it
    *  after draw() and performs the document operation at a safe point. */
   bool takeInsertRequest();
+  /** save the current source using the Shader Lab asset-name field; returns
+   *  true when Ctrl+S was handled by the lab */
+  bool saveCurrentAsset();
   std::string exportedShaderPath() const { return exportedPath_; }
   /** selected font asset used by the generated glyph layout, or empty for
    *  the engine default atlas; exported timeline commands use this path so
@@ -64,8 +67,9 @@ private:
   struct Param {
     std::string name;
     std::string type;
-    float min = 0, max = 1, value = 0;
+    float min = 0, max = 1, value = 0, defaultValue = 0;
     float color[4] = {1, 1, 1, 1};
+    float defaultColor[4] = {1, 1, 1, 1};
   };
   struct Preset { const char* name; const char* category; const char* description; int style; };
 
@@ -86,6 +90,9 @@ private:
   std::string exportedPath_;
   std::string compileError_;
   std::string compileStatus_ = "not compiled";
+  std::string savedSource_;
+  std::string lastCompiledSource_;
+  char saveNameBuf_[128] = "shaderlab_neon";
   std::string selectedPreset_ = "Neon";
   int presetIndex_ = 1;
   int fontIndex_ = 0;
@@ -145,6 +152,7 @@ private:
   void drawTextControls();
   void drawParameterControls();
   void drawSourceEditor();
+  void restoreSource(const std::string& source, const char* status);
 };
 
 } // namespace ns

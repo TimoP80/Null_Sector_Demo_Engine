@@ -34,21 +34,22 @@
 
       <section id="start">
         <h2>Start the editor</h2>
-        <p class="sec-sub">Build the application, then launch the editor against the production you want to author. The editor uses the same renderer and director as standalone playback.</p>
+        <p class="sec-sub">Build the application, then launch the standalone editor against the production you want to author. It uses the same renderer, director, VFS, and asset loaders as the runtime player, while the authoring layer stays in <code>ns_editor.exe</code> instead of increasing the distributed player size.</p>
         <div class="code" data-lang="bash">
           <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">terminal</span><span class="lang">bash</span></div>
-          <pre># open the default production
-./build/Release/ns_demo.exe --editor --demo=data/demo.nsd
+          <pre># standalone editor application (recommended)
+./build/Release/ns_editor.exe --demo=data/demo.nsd
 
 # open a different project
-./build/Release/ns_demo.exe --editor --demo=data/my_show.nsd
+./build/Release/ns_editor.exe --demo=data/my_show.nsd
 
 # optional: start without restoring an audio track
-./build/Release/ns_demo.exe --editor --demo=data/my_show.nsd --no-track</pre>
+./build/Release/ns_editor.exe --demo=data/my_show.nsd --no-track
+</pre>
         </div>
         <div class="callout tip">
           <span class="ct-label">Paused by default</span>
-          <p>The editor opens at <code>0:00</code> with the first scene rendered but the show stopped. Press <kbd>Space</kbd> or click <strong>Play</strong> when you are ready to run the transport. Standalone playback still starts automatically.</p>
+          <p>The editor opens at <code>0:00</code> with the first scene rendered but the show and audio stopped. Press <kbd>Space</kbd> or click <strong>Play</strong> when you are ready to run the transport; pausing stops both the director clock and the loaded audio device. The separate <code>ns_demo</code> player remains autoplaying and contains no editor UI code.</p>
         </div>
       </section>
 
@@ -59,7 +60,7 @@
           <div class="card"><span class="glyph">▣</span><h3>Viewport</h3><p>The actual runtime frame. Select nodes, drag assets onto it, use right-drag for fly camera, and inspect the result at the current playhead.</p></div>
           <div class="card"><span class="glyph blue">☷</span><h3>Hierarchy</h3><p>Scene list and scene-graph nodes. Select a scene to edit its setup, then select a node to edit its transform and payload.</p></div>
           <div class="card"><span class="glyph amber">◈</span><h3>Inspector</h3><p>Transforms, text, models, sprites, lights, particles, camera rigs, visibility, and scene transition controls.</p></div>
-          <div class="card"><span class="glyph">▤</span><h3>Timeline</h3><p>Full-show lanes, scene sections, markers, waveform, FFT strip, beat grid, scrollbar, and Fit-to-show navigation.</p></div>
+          <div class="card"><span class="glyph">▤</span><h3>Timeline</h3><p>Audio-aware lanes, scene sections, markers, waveform, FFT strip, beat grid, scrollbar, middle-drag panning, wheel zoom, and Fit-to-show navigation.</p></div>
           <div class="card"><span class="glyph violet">⌘</span><h3>NSD Commands</h3><p>Templates and an editable source field for commands that are not represented by a specialized inspector.</p></div>
           <div class="card"><span class="glyph hot">ƒ</span><h3>Shader Lab</h3><p>Typography-focused live fragment-shader workspace with presets, parameters, text, compilation diagnostics, and export into the show.</p></div>
         </div>
@@ -93,18 +94,50 @@
           <table class="tbl">
             <thead><tr><th>Control</th><th>Behavior</th></tr></thead>
             <tbody>
-              <tr><td><kbd>Space</kbd> / Play</td><td>Start or pause playback. Editor startup is stopped.</td></tr>
+              <tr><td><kbd>Space</kbd> / Play</td><td>Start or pause the show clock and loaded audio together. Editor startup is stopped.</td></tr>
               <tr><td><kbd>R</kbd> / Restart</td><td>Return to 0:00 and rebuild the active scene.</td></tr>
               <tr><td><kbd>.</kbd></td><td>Advance one frame while stopped.</td></tr>
               <tr><td>Timeline scrub</td><td>Seek the show and re-establish the scene at the target time; audio follows the playhead.</td></tr>
-              <tr><td><strong>Fit</strong> / <kbd>F</kbd></td><td>Fit the entire project duration in the timeline. Press again to restore the previous zoom and scroll position.</td></tr>
-              <tr><td>Scrollbar</td><td>Pan through a long production without changing zoom. The handle shows how much of the show is visible.</td></tr>
+              <tr><td><strong>Fit</strong> / <kbd>F</kbd></td><td>Fit the entire project and loaded audio duration in the timeline. Press again to restore the previous zoom and scroll position.</td></tr>
+              <tr><td>Scrollbar / middle-drag</td><td>Pan left or right through a long production or audio track without changing zoom. The handle shows how much content is visible.</td></tr>
+              <tr><td>Mouse wheel</td><td>Zoom in or out around the cursor position. The view remains clamped to the complete show/audio range.</td></tr>
               <tr><td><kbd>Q</kbd> / <kbd>Shift+Q</kbd></td><td>Toggle beat snapping and cycle beat/bar quantization.</td></tr>
               <tr><td><kbd>F2</kbd></td><td>Reload the NSD script from disk.</td></tr>
             </tbody>
           </table>
         </div>
-        <p>The view window is remembered per project in <code>data/editor_state.json</code>, so loading a project restores the last zoom and scroll position instead of hiding the later sections of a long show.</p>
+        <p>The view window is remembered per project in <code>data/editor_state.json</code>, so loading a project restores the last zoom and scroll position instead of hiding the later sections of a long show. If the loaded audio is longer than the NSD duration, its tail extends the navigable timeline range automatically.</p>
+        <h3>Timeline editing shortcuts</h3>
+        <p>Click an event clip to select it. Selected top-level <code>at { ... }</code> events can be duplicated one bar later with <kbd>Ctrl+D</kbd> or removed with <kbd>Delete</kbd>; scene-derived setup events remain protected and should be edited from the Scene inspector.</p>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+            <tbody>
+              <tr><td><kbd>Space</kbd></td><td>Play / pause.</td></tr>
+              <tr><td><kbd>Home</kbd></td><td>Frame all visible viewport content when the viewport is focused; otherwise fit the show.</td></tr>
+              <tr><td><kbd>F</kbd></td><td>Frame the selected viewport node, or fit/restore the timeline when the timeline has focus.</td></tr>
+              <tr><td><kbd>Ctrl+D</kbd></td><td>Duplicate the selected editable timeline event one bar later.</td></tr>
+              <tr><td><kbd>Delete</kbd></td><td>Delete the selected node or selected editable timeline event.</td></tr>
+              <tr><td><kbd>Ctrl+S</kbd> / <kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Y</kbd></td><td>Save, undo, and redo document edits.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="viewport">
+        <h2>Viewport navigation</h2>
+        <p class="sec-sub">The viewport always shows the real engine output. Navigation overlays are editor-only and never enter MP4 exports.</p>
+        <ul>
+          <li><strong>RMB drag:</strong> enter free-camera mode. Use <kbd>WASD</kbd> to move, <kbd>Q</kbd>/<kbd>E</kbd> for down/up, <kbd>Shift</kbd> for fast movement, and <kbd>Ctrl</kbd> for slow movement. Release RMB or press <kbd>Esc</kbd> to return the mouse to the editor.</li>
+          <li><strong>Mouse wheel while flying:</strong> adjust free-camera speed.</li>
+          <li><strong><kbd>F</kbd>:</strong> frame the selected node. <kbd>Home</kbd> frames all visible scene content. The camera remains locked to that focus until playback or another camera action takes over.</li>
+          <li>Toggle <strong>Grid</strong>, <strong>World axes</strong>, <strong>Safe frame</strong>, and <strong>Center crosshair</strong> under <strong>View → Viewport guides</strong>. These preferences persist in <code>data/editor_state.json</code>.</li>
+          <li>Use <strong>View → Create Camera From View</strong>, the Inspector button, or <kbd>Ctrl+Alt+C</kbd> to create/update a static production camera from the current free-camera pose. The operation is serialized into the selected scene and is undoable.</li>
+        </ul>
+        <div class="callout tip">
+          <span class="ct-label">Fly, compose, capture</span>
+          <p>Enter free-camera mode, find an interesting angle, exit or keep the camera active, then choose <strong>Create Camera From View</strong>. The scene's camera rig now uses that position, forward target, and FOV instead of requiring manual coordinate entry.</p>
+        </div>
       </section>
 
       <section id="audio">
@@ -114,7 +147,8 @@
           <li>WAV/MP3/OGG/FLAC files are decoded asynchronously so the editor remains responsive.</li>
           <li>The audio analysis detects kicks and estimates BPM automatically when a track is loaded.</li>
           <li>The detected BPM is applied to the project, serialized into the active <code>.nsd</code>, and used immediately for bars, beat grid, timeline snapping, and audio-reactive playback.</li>
-          <li>The waveform, FFT spectrogram, kick markers, beat grid, and phase alignment tools live in the Timeline panel.</li>
+          <li>The waveform, FFT spectrogram, kick markers, beat grid, phase alignment tools, and audio-aware timeline range live in the Timeline panel.</li>
+          <li>Press <kbd>Space</kbd> or use Play/Pause to start and stop the audio and show clock together; loading or replacing a track does not clear the active shader/source document.</li>
           <li>Use <strong>Align beats to kicks</strong> when the BPM is correct but the track phase needs nudging. The alignment is stored per track.</li>
         </ul>
         <div class="code" data-lang="nsd">
@@ -128,7 +162,7 @@
 
       <section id="scenes">
         <h2>Scenes and NSD commands</h2>
-        <p class="sec-sub">Use the scene list to jump directly to a scene declaration. Specialized inspector controls cover common edits; <strong>View → NSD Commands</strong> exposes the complete command vocabulary when a production needs something more specific.</p>
+        <p class="sec-sub">Use the scene list to jump directly to a scene declaration. Click the toolbar's <strong>+ Scene</strong> button to append a uniquely named scene with a camera, placeholder effect, fades, and a scheduled activation. Specialized inspector controls cover common edits; <strong>View → NSD Commands</strong> exposes the complete command vocabulary when a production needs something more specific.</p>
         <div class="code" data-lang="nsd">
           <div class="code-head"><span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span><span class="fname">data/my_show.nsd</span><span class="lang">nsd</span></div>
           <pre>scene Core {
@@ -164,6 +198,7 @@ at 32 {
           </table>
         </div>
         <p>If a scene has no camera command, use <strong>Add camera rig</strong> in the inspector to create one, then select the rig type from the combo box.</p>
+        <div class="callout info"><span class="ct-label">Video playback</span><p>Video playback requires <code>ffmpeg</code> on <code>PATH</code>. Development files are read from <code>data/video/</code>; packaged <code>.nsp</code> assets are extracted to a temporary file for the shared ffmpeg pipe and removed when the scene changes or the app exits.</p></div>
       </section>
 
       <section id="transitions">
@@ -186,15 +221,18 @@ at 32 {
         <h2>Assets, shaders, and Shader Lab</h2>
         <p class="sec-sub">The editor uses one asset workflow for disk files, browser rows, OS drops, and live previews.</p>
         <ul>
-          <li><strong>Shader:</strong> choose a <code>.frag</code> in <strong>File → Open Asset</strong> to display it live in the viewport. A shader can also be dragged onto the viewport. <strong>Add to Scene</strong> copies it into <code>shaders/</code>, inserts a shader command, and saves the project.</li>
+          <li><strong>Shader:</strong> choose a <code>.frag</code> in <strong>File → Open Asset</strong> to display it live in the viewport. A shader can also be dragged onto the viewport, or dragged directly from a fragment-shader row in the docked <strong>Assets</strong> panel. <strong>Add to Scene</strong> copies it into <code>shaders/</code>, inserts a shader command, and saves the project.</li>
           <li><strong>Model:</strong> browse or drop <code>.obj</code> and <code>.glb</code> assets to warm the model path or assign them through a scene command.</li>
+          <li><strong>Video:</strong> choose <code>.mp4</code>, <code>.mkv</code>, <code>.webm</code>, or <code>.mov</code> in <strong>File → Open Asset → Video</strong>. The editor copies external files into <code>data/video/</code>, adds a <code>video</code> scene command, saves, and reloads the live preview.</li>
           <li><strong>Image:</strong> use an image node and its transition options for textured entrance animations.</li>
+          <li><strong>Video:</strong> add <code>video clip.mp4 { size (2,1.125,1); width 1280; height 720; fps 30; loop true }</code> to a scene setup. The runtime decodes with the system <code>ffmpeg</code> executable, uploads frames to one reusable texture, and the Inspector exposes file, decode size, FPS, loop, opacity, and quad size.</li>
           <li><strong>Fonts:</strong> text nodes and Shader Lab can use multiple TrueType/OpenType files from <code>assets/fonts/</code>; leave the text-node font field blank for the project default or enter a path such as <code>assets/fonts/intro.ttf</code>.</li>
+          <li><strong>Live viewport text editing:</strong> select a text node in the Hierarchy, then double-click inside its highlighted text box in the Viewport. Edit the caption directly over the live preview; changes appear immediately and commit as one undoable document operation when you click away or press <kbd>Ctrl+Enter</kbd>. Press <kbd>Esc</kbd> to cancel.</li>
           <li><strong>Texture:</strong> drop a texture onto a selected Sprite node to assign it immediately, or use a Shader Lab fill texture for image-driven glyph colour.</li>
           <li><strong>Script:</strong> open another <code>.nsd</code> from the browser to switch projects.</li>
         </ul>
         <h3>Shader Lab</h3>
-        <p>Open <strong>View → Shader Lab</strong> to show the typography-oriented shader workspace. Enter text, choose any discovered font, select a preset, tune parameters, map controls to audio-reactive values, and choose a fill texture from <code>assets/textures/</code> or <code>data/textures/</code>. Texture mix, scale, and motion controls create colourful image-driven fills instead of a flat colour. Edit the generated GLSL and compile it live. Use <strong>Export / Add to Scene</strong> to place the result into the production; the selected font and texture are serialized with the shader command so playback matches the preview. The underlying shader source remains available for advanced edits.</p>
+        <p>Open <strong>View → Shader Lab</strong> to show the typography-oriented shader workspace. Enter text, choose any discovered font, select a preset, tune parameters, map controls to audio-reactive values, and choose a fill texture from <code>assets/textures/</code> or <code>data/textures/</code>. Texture mix, scale, and motion controls create colourful image-driven fills instead of a flat colour. Edit the generated GLSL and compile it live. The source editor shows line numbers, an unsaved marker, compile status, and diagnostics; a compile failure keeps the last valid preview visible. Use <strong>Revert compiled</strong>, <strong>Revert saved</strong>, <strong>Reset parameters</strong>, or the asset-name field with <strong>Save As</strong> when iterating. Use <strong>Export / Add to Scene</strong> to place the result into the production; the selected font and texture are serialized with the shader command so playback matches the preview. The underlying shader source remains available for advanced edits.</p>
         <div class="callout warn">
           <span class="ct-label">Preview isolation</span>
           <p>Changing scenes or selecting another shader clears the previous editor-only preview. If a shader compiles incorrectly, the diagnostics appear in the Console and the previous valid program is retained by the live-reload path.</p>
@@ -229,6 +267,7 @@ at 32 {
           <li>Select a scene from the scene list and tune its Camera Rig, transitions, nodes, and text in the Inspector.</li>
           <li>Use NSD Commands for anything not covered by a specialized control; keep the generated source small and validate before inserting.</li>
           <li>Drop shaders, models, images, or textures onto the appropriate panel and inspect compile/load messages in Console.</li>
+          <li>Use <kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Y</kbd> after meaningful authoring actions; one continuous text drag or inspector edit is treated as one document operation.</li>
           <li>Save the <code>.nsd</code>, run a short MP4 preview, then package the final project for distribution.</li>
         </ol>
         <div class="callout tip">

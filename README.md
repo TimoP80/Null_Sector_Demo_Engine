@@ -64,9 +64,11 @@ The repository ships two full productions and one miniature example:
 **Demo editor (Dear ImGui)**
 - A real document model over the `.nsd` AST with snapshot **undo/redo**, a
   keyframe **curve editor**, editable **markers**, a video-editor-style
-  **timeline** (scrub, grid snap, fit-all), scene browser, hierarchy,
-  inspector, live viewport with fly camera, drag-and-drop asset imports and a
-  **Shader Lab** for typography shaders.
+  **timeline** (scrub, grid snap, audio-aware fit-all, horizontal scrollbar,
+  middle-drag panning and wheel zoom), scene browser, hierarchy, inspector,
+  live viewport with fly camera, drag-and-drop asset imports and a
+  **Shader Lab** for typography shaders. The toolbar's **+ Scene** button adds
+  a uniquely named scene and activation block without hand-editing the script.
 - Project workflows: New / Load / Save / Save As `.nsd`, **Export MP4**
   (in-process ffmpeg capture with audio mux) and **Package Project**
   (`.nsp` + self-contained exe + `launch.bat` + portable ZIP).
@@ -76,7 +78,9 @@ The repository ships two full productions and one miniature example:
   prompt → GLSL, live preview with audio reactivity, parameter sliders,
   generation history, compile-error repair, project files (`.nsshad`) and
   export back into the engine's shader path. Ships with an offline built-in
-  provider; any OpenAI-compatible endpoint can be configured.
+  provider; any OpenAI-compatible endpoint can be configured. Provider settings
+  include a configurable request timeout (default 600 seconds), which is useful
+  for reasoning models that may take minutes before returning a response.
 
 **Virtual filesystem & packaging**
 - Every runtime asset read goes through a VFS, so the same production runs
@@ -139,6 +143,12 @@ cmake --build build --config Release
 # verify its offline generation/compile/recovery/project workflow
 ./build/Release/ns_shader_ai.exe --smoke
 
+# convert a Shadertoy .glsl (single-pass or multi-pass with `// pass:` markers)
+# or a Shadertoy JSON API export to a single Null Sector fragment shader
+# (buffers folded, textures as samplers); data/shadertoy/multipass_example.glsl
+# is a shipped multi-pass example
+./build/Release/ns_shader_ai.exe --convert-shadertoy=data/shadertoy/multipass_example.glsl --out=multipass_example.frag
+
 # export the show to an MP4 (real-time, music-synced; ffmpeg must be on PATH)
 ./build/Release/ns_demo.exe --demo=data/demo.nsd --windowed --window=1920x1080 \
     --export-mp4=ghost.mp4
@@ -172,8 +182,8 @@ All flags are shared by the player (`ns_demo.exe`) and the standalone editor
 | `--plugin=DIR` | effect plugin directory (default `data/plugins`) |
 | `--windowed` / `--fullscreen` | window vs fullscreen (fullscreen is the default — it's a show) |
 | `--window=WxH` | window size when windowed (default 1600×900) |
-| `--editor` | dockable demo editor (ImGui) inside `ns_demo.exe`; `ns_editor.exe` always runs it |
-| `--editor-seconds=N` | with `--editor`: auto-close after N seconds (CI) |
+| `--editor` | dockable demo editor (ImGui); always enabled in `ns_editor.exe` — `ns_demo` is runtime-only and rejects the flag with a hint |
+| `--editor-seconds=N` | with `--editor`: auto-close after N seconds (CI smoke) |
 | `--shot=SEC:FILE.bmp` | seek to SEC, save one presented frame as a 24-bit BMP, exit |
 | `--shot-noseek` | with `--shot`: run from 0 and capture when the clock reaches SEC |
 | `--export-mp4=FILE` | render the show once to an H.264 MP4 (real-time, music-synced; ffmpeg must be on PATH; muxes the playing track; `--window=WxH` sets the resolution) |
@@ -211,8 +221,10 @@ Environment variables `NULLSECTOR_SHADER_DIR`, `NULLSECTOR_DATA_DIR` and
 
 The editor additionally uses `Ctrl+S` (save), `Ctrl+Shift+S` (save as),
 `Ctrl+Z` / `Ctrl+Y` (undo / redo), `.` (step one frame), `F` / `Home` (timeline
-fit-all), `Ctrl+Alt+C` (create camera from current view) and right-mouse drag
-in the viewport (fly camera).
+fit-all), `Ctrl+Alt+C` (create camera from current view), middle-mouse drag
+(timeline pan), mouse-wheel over the timeline (zoom), and right-mouse drag in
+the viewport (fly camera). In editor mode, `Space` pauses/resumes both the
+show clock and loaded audio.
 
 ## The .nsd language
 
@@ -292,7 +304,9 @@ exporting:
 
 The demo loop also supports runtime track switching (`T` / `Shift+T`) with an
 async decode — the show keeps playing until the swap commits — and shows a
-short on-screen readout of the loaded track. `--track=F1,F2,...` pins an
+short on-screen readout of the loaded track. In the editor, Space/Play/Pause
+controls the audio device and show clock together; loading or replacing a track
+preserves the active shader/source document. `--track=F1,F2,...` pins an
 explicit A/B cycle list, and track auto-discovery is scoped to the
 production's own directory so sibling shows' music never leaks in.
 
@@ -355,12 +369,14 @@ Everything the show reads can be edited while it runs:
   diagnostics.
 - **Assets** — the file watcher covers textures, models, materials and audio;
   the editor's `+ Scene`, `+ Asset`, track loader and drag-and-drop flows write
-  data files and apply them immediately.
+  data files and apply them immediately. Fragment shaders can be dragged
+  directly from `.frag` rows in the docked Assets panel, not only from the
+  Open Asset browser.
 
 ## The demo editor
 
-`ns_editor.exe` (or `ns_demo.exe --editor`) opens a dockable Dear ImGui shell
-around the running engine: live viewport, scene hierarchy, inspector, timeline,
+`ns_editor.exe` opens a dockable Dear ImGui shell around the running engine
+(`ns_demo` is deliberately runtime-only; launch the editor binary instead): live viewport, scene hierarchy, inspector, timeline,
 console, assets and profiler panels (View menu toggles each, layouts persist in
 `imgui.ini`).
 
@@ -372,8 +388,10 @@ add-scene, undo). Undo/redo is snapshot-based, one step per gesture, with a
 dirty `*` in the window title that clears on Ctrl+S.
 
 **Timeline** — video-editor-style transport: scrub (audio stays in sync), grid
-snap, section boundaries, fit-all (`F` / `Home`), loop and step-one-frame.
-Views persist per project file.
+snap, section boundaries, audio-aware fit-all (`F` / `Home`), loop and
+step-one-frame. A loaded track longer than the NSD show extends the timeline
+content range; use the bottom scrollbar or middle-drag to pan and the mouse
+wheel to zoom around the cursor. Views persist per project file.
 
 **Keyframe curves** (View > Curves) — a channel list over the `anim` commands
 in the document: draggable keys with multi-select, double-click to add,
@@ -429,6 +447,8 @@ the engine's real Shader, VFS and fullscreen-triangle path:
   vertex / pair, and generate.
 - Live 16:9 preview with **simulated or real audio reactivity** — load a track
   and the FFT drives the shader; six audio sliders simulate levels without one.
+  Play/Pause and Space control the preview clock together with loaded audio,
+  and loading audio preserves the current shader source/editor buffer.
 - Parameter sliders from `// @param` declarations, a rough ALU/texture/loop
   performance estimate, and compile diagnostics with click-to-line.
 - Version history with restore, an "Ask AI to Fix" repair flow that feeds the
@@ -436,8 +456,36 @@ the engine's real Shader, VFS and fullscreen-triangle path:
   spec, source, history, preview settings).
 - Export as `.frag`/`.vert` (or copy the NSD `shader` snippet) straight into
   the engine. Ships with an offline built-in provider; configure any
-  OpenAI-compatible endpoint in View > Settings (API keys are never written to
-  project files).
+  OpenAI-compatible endpoint in View > Settings. Use Save settings to retain
+  the provider configuration; Windows protects the API key with the current
+  user's DPAPI credentials, and keys are never written to project files.
+- **Headless Shadertoy conversion** — `ns_shader_ai.exe --convert-shadertoy=in.glsl
+  --out=out.frag` (no window opens; `--out` defaults to `in.glsl.frag`) turns a
+  Shadertoy shader — single-pass, or the engine's multi-pass `// pass:` marker
+  format — into one portable Null Sector fragment shader: buffer passes fold
+  into `vec4` helper functions, texture channels become samplers the caller
+  binds at runtime (printed as `Bind:` notes), and the standard uniform shim
+  (`uResolution`, `uTime`, `uBass`, …) is emitted so it compiles anywhere
+  those uniforms exist. Multi-channel imports work in all three forms:
+  standard Shadertoy `#iChannelN "spec"` resource lines, `// channel:`
+  comments, and code that samples `iChannelN` with no wiring comment at all
+  (every sampled-but-unwired channel is inferred as a bindable sampler
+  instead of reading black). In the editor, channel textures referenced by
+  `https://` URLs (and Shadertoy `/media/` `/presets/` asset paths) are
+  downloaded automatically to `data/textures/` on a background thread and
+  bound to the preview the moment they land, with re-imports served from the
+  local cache. Transient failures retry automatically with a tunable backoff
+  (attempts and wait set in Provider settings) and the active attempt shows
+  as `retrying N/M...` in the Texture Channels row. Shadertoy **JSON API exports**
+  (`{"Shader": {"renderpass": [...]}}`) are accepted too: the per-pass code
+  blocks are mapped onto the same passes (`Common`, `Image`, `Buffer A`–`D`),
+  each pass's `inputs` array is wired to channels (textures → samplers,
+  buffers → folded calls, audio/keyboard → stubs), `Sound`/`Cube` passes are
+  skipped with a note, and JSON that isn't a Shadertoy export is rejected
+  with an error instead of producing broken
+  GLSL. A worked example ships at `data/shadertoy/multipass_example.glsl`
+  (common + two buffers + an image pass with `// channel:` wiring) and is
+  verified by `--check-shadertoy` every run.
 
 ## Virtual filesystem & packaging
 
@@ -499,7 +547,7 @@ editor has its own Profiler panel.
 ./build/Release/ns_demo.exe --check-models               # OBJ/GLB -> lit -> readback
 ./build/Release/ns_demo.exe --check-shadertoy            # every data/shadertoy/*.glsl
 ./build/Release/ns_demo.exe --check-hotreload --no-track # break + fix live reload
-./build/Release/ns_demo.exe --smoke-audio --track=music.mp3
+./build/Release/ns_demo.exe --smoke-audio --track=data/neural_dust/track.wav   # any WAV/MP3 works
 ```
 
 The editor adds end-to-end smoke modes driven by environment variables:

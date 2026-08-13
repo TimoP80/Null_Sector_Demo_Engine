@@ -29,7 +29,7 @@ namespace ns {
 // --- node payloads ------------------------------------------------------------
 
 enum class NodeType : int {
-  Empty = 0, Camera, Light, Mesh, Particles, Quad, Sprite, Text, Post, TimelineSystem,
+  Empty = 0, Camera, Light, Mesh, Particles, Quad, Sprite, Video, Text, Post, TimelineSystem,
 };
 
 const char* nodeTypeName(NodeType t);
@@ -79,6 +79,16 @@ struct SpriteData {
   V3 size{1, 1, 1};                   // quad size in world units
 };
 
+struct VideoData {
+  std::string file;                   // video path, normally data/video/...
+  int width = 1280;
+  int height = 720;
+  float fps = 30.0f;
+  bool loop = true;
+  float opacity = 1.0f;
+  V3 size{1, 1, 1};
+};
+
 struct TextData {
   std::string text;
   int sizePx = 24;
@@ -98,7 +108,7 @@ struct TimelineData {
 };
 
 using NodePayload = std::variant<std::monostate, CamData, LightData, MeshData,
-                                 ParticleData, QuadData, SpriteData, TextData,
+                                 ParticleData, QuadData, SpriteData, VideoData, TextData,
                                  PostData, TimelineData>;
 
 // --- node ----------------------------------------------------------------------
@@ -163,6 +173,7 @@ public:
   ParticleData* asParticles();
   QuadData* asQuad();
   SpriteData* asSprite();
+  VideoData* asVideo();
   TextData* asText();
   PostData* asPost();
   TimelineData* asTimeline();

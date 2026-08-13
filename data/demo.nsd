@@ -1,11 +1,12 @@
 demo "NULL SECTOR DEMO ENGINE" {
+    bpm 118.5
     duration 125
 }
 
 scene Intro {
     bars 12  intensity 0.12
     title "Awakening"
-    camera IntroCam { rig drift; pos (0,0,2.4); fov (50,58); amp 1.6; freq 0.14; handheld (0.04,0.3) }
+    camera IntroCam { rig nave; pos (0,0,2.4); fov (50,58); amp 1.6; freq 0.14; handheld (0.04,0.3) }
     show intro
     play music
     fade in 2

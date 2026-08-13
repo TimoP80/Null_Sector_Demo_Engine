@@ -42,12 +42,12 @@ public:
   void line(EffectContext& ctx, const std::string& text, float centerY, int sizePx,
             CineStyle style, float alpha, float seed = 0, float glow = 0.5f,
             float progress = 1.0f, float energy = 0, float centerX = 0,
-            const Assets* fontAssets = nullptr) {
+            const Assets* fontAssets = nullptr, float align = -1.0f) {
     if (alpha <= 0.01f || text.empty()) return;
     const Assets& atlas = fontAssets ? *fontAssets : *ctx.assets;
     const Renderer& r = *ctx.r;
     font_ = atlas.fontMetrics;
-    textMesh_.build({{text, -1.0f, seed}}, font_,
+    textMesh_.build({{text, align, seed}}, font_,
                     {r.viewW, r.viewH, sizePx, 0, centerX}, centerY);
     if (textMesh_.empty()) return;
     prog_->use();

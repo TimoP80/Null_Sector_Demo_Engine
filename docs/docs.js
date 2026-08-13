@@ -26,6 +26,7 @@
     ]},
     { group: "Rendering", items: [
       { href: "shaders.html", num: "07", label: "Shader Manager" },
+      { href: "shader-ai.html", num: "AI", label: "AI Shader Generator" },
       { href: "shadertoy.html", num: "08", label: "Shadertoy Import" },
       { href: "postfx.html", num: "09", label: "Post FX" },
       { href: "assets.html", num: "10", label: "Assets & Reload" },

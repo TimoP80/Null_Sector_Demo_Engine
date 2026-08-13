@@ -187,6 +187,14 @@ ProdCheckResult checkProduction(const std::string& scriptPath,
       const std::string model = c.opts.get("model").asStr(c.args.empty() ? "" : c.args[0].asStr());
       if (!model.empty())
         chk.c(fileExists(dataDir + "/models/" + model), "mesh model '" + model + "'");
+    } else if (c.name == "video") {
+      const std::string file = c.opts.get("file").asStr(c.args.empty() ? "" : c.args[0].asStr());
+      if (!file.empty()) {
+        const std::string path = file.rfind("data/", 0) == 0
+                                     ? file
+                                     : dataDir + "/video/" + file;
+        chk.c(fileExists(path), "video file '" + file + "' (" + path + ")");
+      }
     } else if (c.name == "sprite" || c.name == "image") {
       std::string tex = c.opts.get("tex").asStr();
       if (tex.empty()) {

@@ -17,6 +17,7 @@ NSGL_DECL(void, glBlendFunc, (GLenum, GLenum));
 NSGL_DECL(void, glActiveTexture, (GLenum));
 NSGL_DECL(void, glBindTexture, (GLenum, GLuint));
 NSGL_DECL(void, glTexImage2D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*));
+NSGL_DECL(void, glTexSubImage2D, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void*));
 NSGL_DECL(void, glTexParameteri, (GLenum, GLenum, GLint));
 NSGL_DECL(void, glGenerateMipmap, (GLenum));
 NSGL_DECL(void, glPixelStorei, (GLenum, GLint));
@@ -92,6 +93,7 @@ bool glLoadFunctions() {
   NSGL_LOAD(glActiveTexture);
   NSGL_LOAD(glBindTexture);
   NSGL_LOAD(glTexImage2D);
+  NSGL_LOAD(glTexSubImage2D);
   NSGL_LOAD(glTexParameteri);
   NSGL_LOAD(glGenerateMipmap);
   NSGL_LOAD(glPixelStorei);

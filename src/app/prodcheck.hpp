@@ -14,7 +14,7 @@
 //   shader FILE     shaders/FILE exists
 //   post preset     data/post/NAME.json exists
 //   camera rig      the rig type is one of the known behaviors
-//   mesh/sprite     the referenced model / texture files exist
+//   mesh/sprite/video the referenced model / texture / video files exist
 //   sections        starts are monotonic, ends are within the declared duration
 //
 // Runs before the window/GL context is created (it needs neither), so CI can

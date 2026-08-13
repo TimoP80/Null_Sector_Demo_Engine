@@ -66,7 +66,9 @@
 #include "app/prodcheck.hpp"
 #include "app/shadermanager.hpp"
 #include "app/shadertoycheck.hpp"
+#ifndef NULLSECTOR_RUNTIME_ONLY
 #include "editor/editor.hpp"
+#endif
 #include "engine/audio.hpp"
 #include "engine/assets.hpp"
 #include "engine/camera.hpp"
@@ -219,7 +221,7 @@ static DirectorTime* g_director = nullptr;
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
-int main(int argc, char** argv) {
+int nsDemoMain(int argc, char** argv) {
   std::string trackOverride, fontOverride, demoPath, pluginDir, perfJsonPath, perfCsvPath,
       perfRawPath, checkProductionPath, shotFile;
   std::string packArg, outputArg, playArg, rootArg;  // --pack / --output / --play / --root
@@ -227,11 +229,15 @@ int main(int argc, char** argv) {
        checkHotReload = false, checkShadertoy = false;
   float shotSeconds = -1;  // --shot=SECONDS:FILE.bmp: seek there, save one frame, exit
   bool shotNoSeek = false;  // --shot-noseek: run from 0, capture at target
+#ifndef NULLSECTOR_RUNTIME_ONLY
   bool editorMode = false;  // --editor: dockable demo editor instead of the plain loop
+#endif
   bool fullscreen = true;   // the demo is a show: fullscreen by default
   int winW = 1600, winH = 900;
   float perfSeconds = 0;    // --perf-json/--perf-csv/--perf-raw runs: auto-exit after N s
+#ifndef NULLSECTOR_RUNTIME_ONLY
   float editorSeconds = 0;  // --editor-seconds=N: auto-close the editor after N s (CI)
+#endif
   std::string exportMp4;       // --export-mp4=OUT.mp4: render the show once to an H.264 MP4
   std::string exportAudioPath;  // resolved boot track, muxed into the MP4 by ffmpeg
   float exportFps = 60.0f;     // --export-fps=N: capture rate (default 60)
@@ -281,8 +287,16 @@ int main(int argc, char** argv) {
         shotSeconds = (float)std::atof(v.substr(0, c).c_str());
         shotFile = v.substr(c + 1);
       }
-    } else if (a == "--editor") editorMode = true;
+    }
+#ifndef NULLSECTOR_RUNTIME_ONLY
+    else if (a == "--editor") editorMode = true;
     else if (a.rfind("--editor-seconds=", 0) == 0) editorSeconds = (float)std::atof(a.c_str() + 17);
+#else
+    else if (a == "--editor" || a.rfind("--editor-seconds=", 0) == 0) {
+      std::fprintf(stderr, "[MAIN] editor support is in ns_editor.exe; launch the standalone editor instead\n");
+      return 1;
+    }
+#endif
     else if (a == "--help" || a == "-h") {
       std::printf("NULL SECTOR // DEMO ENGINE (data-driven)\n"
                   "  --check-production[=PATH]  headless production validation (no GL): parse\n"
@@ -303,8 +317,10 @@ int main(int argc, char** argv) {
                   "  --perf-csv[=PATH]   append per-second GPU-time rows (default perf.csv)\n"
                   "  --perf-raw[=PATH]   append every collected raw sample (default perf.raw.csv)\n"
                   "  --perf-seconds=N    auto-exit after N s + dump (scripted A/B runs)\n"
+#ifndef NULLSECTOR_RUNTIME_ONLY
                   "  --editor         dockable demo editor (ImGui) - live preview + timeline\n"
                   "  --editor-seconds=N  with --editor: auto-close after N s (CI smoke)\n"
+#endif
                   "  --windowed       start in a window (default is fullscreen)\n"
                   "  --fullscreen     start in fullscreen (default)\n"
                   "  --shot=SEC:FILE.bmp  seek to SEC, save one presented frame, exit\n" \
@@ -325,6 +341,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[MAIN] --perf-seconds=N without --perf-json/--perf-csv/--perf-raw "
                          "has no effect - add one to enable the scripted perf dump\n");
   }
+#ifndef NULLSECTOR_RUNTIME_ONLY
   if (editorMode && (!perfJsonPath.empty() || !perfCsvPath.empty() || !perfRawPath.empty())) {
     std::fprintf(stderr, "[MAIN] --editor ignores --perf-json/--perf-csv/--perf-raw "
                          "(the editor has its own Profiler panel)\n");
@@ -333,6 +350,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[MAIN] --export-mp4 conflicts with --editor (export renders the show once)\n");
     return 1;
   }
+#endif
   if (!exportMp4.empty() && shotSeconds >= 0.0f) {
     std::fprintf(stderr, "[MAIN] --export-mp4 conflicts with --shot (export captures the whole show)\n");
     return 1;
@@ -340,11 +358,13 @@ int main(int argc, char** argv) {
   if (exportFps < 1.0f) exportFps = 1.0f;
   if (exportFps > 240.0f) exportFps = 240.0f;
 
+#ifndef NULLSECTOR_RUNTIME_ONLY
   // the editor is a tool, not the show: windowed by default, a sensible size
   if (editorMode) {
     fullscreen = false;
     if (winW == 1600 && winH == 900) { winW = 1680; winH = 960; }
   }
+#endif
 
   // --- packaging mode (GL-free) -----------------------------------------------
   // ns_demo --pack data/demo.nsd --output NullSectorDemoEngine.nsp
@@ -406,8 +426,12 @@ int main(int argc, char** argv) {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
   g_window = glfwCreateWindow(winW, winH,
+#ifndef NULLSECTOR_RUNTIME_ONLY
                               editorMode ? "NULL SECTOR // DEMO EDITOR"
                                          : "Null Sector Demo Engine",
+#else
+                              "Null Sector Demo Engine",
+#endif
                               nullptr, nullptr);
   if (!g_window) { std::fprintf(stderr, "[MAIN] window creation failed\n"); glfwTerminate(); return 1; }
   glfwMakeContextCurrent(g_window);
@@ -601,7 +625,11 @@ int main(int argc, char** argv) {
   // The standalone player remains autoplaying, but the editor owns its
   // transport: it starts paused and lazily starts audio when Play/Space is
   // pressed so opening a project never begins playback unexpectedly.
+#ifndef NULLSECTOR_RUNTIME_ONLY
   if (!editorMode) audio.start();
+#else
+  audio.start();
+#endif
 
   // --shot=SECONDS:FILE.bmp: jump the show + track straight to the target
   // (a little early so the audio analyser has ~1s of history when the frame
@@ -620,12 +648,17 @@ int main(int argc, char** argv) {
     }
   }
 
+#ifndef NULLSECTOR_RUNTIME_ONLY
   // --- demo editor mode: the engine runs inside a dockable ImGui shell -----------
   if (editorMode) {
     // A video-editor style transport opens at the beginning and stays stopped
     // until the author presses Play or Space. Seek once so the first frame
     // still activates the section at t=0 without advancing the clock.
     director.paused = true;
+    // The player starts audio eagerly, but the editor transport opens paused.
+    // Stop the audio clock here so the first Space/Play action starts both
+    // director and audio together.
+    audio.setPlaying(false);
     app.seek(director.show);
     timeline.advance(director.show);
 
@@ -660,6 +693,7 @@ int main(int argc, char** argv) {
     glfwTerminate();
     return 0;
   }
+#endif
 
   // --- MP4 export: pipe every presented frame (RGB24) into ffmpeg -----------
   FILE* exportPipe = nullptr;
@@ -1024,3 +1058,9 @@ int main(int argc, char** argv) {
   glfwTerminate();
   return 0;
 }
+
+#ifndef NULLSECTOR_STANDALONE_EDITOR
+int main(int argc, char** argv) {
+  return nsDemoMain(argc, argv);
+}
+#endif
