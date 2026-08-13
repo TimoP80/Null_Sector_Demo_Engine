@@ -452,10 +452,18 @@ std::string modelListEndpoint(const std::string& endpoint) {
 std::string remotePrompt(const GenerationRequest& r, bool repair) {
   std::ostringstream s;
   s << "You are the Null Sector demoscene shader programmer. Return ONLY a JSON object with keys "
-       "specification, explanation, fragment, vertex. No markdown fences. Generate editable GLSL using "
-       "#version 300 es and these existing uniforms: uResolution, uTime, uBPM, uBeat, uBar, "
-       "uBeatPhase, uAudioLevel, uBass, uMid, uTreble, uKick, uSnare, uColor, uColor2, "
-       "uIntensity, uSpeed, uScale. Include // @param metadata. Keep loops bounded and avoid undefined engine APIs.\n";
+       "specification, explanation, fragment, vertex. No markdown fences.\n"
+    << "Write a complete, self-contained GLSL ES 3.00 fragment shader that starts with \"#version 300 es\" "
+       "and declares its own output, e.g. \"out vec4 fragColor;\", assigned in main(). Do not use "
+       "gl_FragColor. The render pass provides the varying \"in vec2 vUV;\" (screen UV, 0..1) which "
+       "you may declare and use, or compute your own per-pixel position with \"vec2 uv = "
+       "gl_FragCoord.xy / uResolution;\". THE OUTPUT MUST VARY ACROSS THE SCREEN: every pixel's "
+       "color has to depend on its position (vUV / uv / gl_FragCoord), never on uTime or other "
+       "uniforms alone - a screen that is one solid flashing color is a bug.\n"
+    << "These uniforms are already declared - do not redeclare them: uResolution, uTime, uBPM, "
+       "uBeat, uBar, uBeatPhase, uAudioLevel, uBass, uMid, uTreble, uKick, uSnare, uColor, "
+       "uColor2, uIntensity, uSpeed, uScale. Include // @param metadata. Keep loops bounded and "
+       "avoid undefined engine APIs.\n";
   s << "Shader type: " << shaderKindName(r.kind) << "\n";
   if (repair) s << "Repair this shader without changing its visual intent. Compiler diagnostics:\n" << r.diagnostics << "\n";
   else s << "Create or modify the effect from this request:\n" << r.prompt << "\n";
@@ -519,6 +527,35 @@ std::string cleanGeneratedSource(std::string source) {
   return source;
 }
 
+/** Make a provider fragment source compile as a Null Sector fullscreen pass.
+ *  Without an explicit #version the source silently compiles as legacy GLSL,
+ *  which accepts gl_FragColor and time-only outputs - the classic "flashing
+ *  solid color" degenerate shader. The pass provides `in vec2 vUV`; the
+ *  canonical output name is `out vec4 fragColor`. */
+std::string hardenFragmentSource(std::string source) {
+  if (source.find("#version") == std::string::npos)
+    source = "#version 300 es\nprecision highp float;\nprecision highp int;\n\n" + source;
+  size_t p = 0;
+  while ((p = source.find("gl_FragColor", p)) != std::string::npos) {
+    source.replace(p, 12, "fragColor");
+    p += 9;
+  }
+  const bool hasFragColor = source.find("out vec4 fragColor") != std::string::npos;
+  const bool hasFragColorCap = source.find("out vec4 FragColor") != std::string::npos;
+  if (!hasFragColor && hasFragColorCap) {
+    // a differently-cased output declaration is renamed to the canonical name
+    size_t q = 0;
+    while ((q = source.find("FragColor", q)) != std::string::npos) {
+      source.replace(q, 9, "fragColor");
+      q += 9;
+    }
+  } else if (!hasFragColor) {
+    const size_t main = source.find("void main");
+    source.insert(main == std::string::npos ? source.size() : main, "out vec4 fragColor;\n");
+  }
+  return source;
+}
+
 GeneratedShader parseRemote(const std::string& body, ShaderKind kind, int generationId) {
   const std::string json = stripFences(body);
   try {
@@ -527,9 +564,10 @@ GeneratedShader parseRemote(const std::string& body, ShaderKind kind, int genera
     out.kind = kind;
     out.specification = root.get("specification").asStr();
     out.explanation = root.get("explanation").asStr();
-    out.fragment = cleanGeneratedSource(root.get("fragment").asStr());
+    out.fragment = hardenFragmentSource(cleanGeneratedSource(root.get("fragment").asStr()));
     out.vertex = cleanGeneratedSource(root.get("vertex").asStr());
-    if (out.fragment.empty() && root.get("content").isStr()) out.fragment = cleanGeneratedSource(root.get("content").asStr());
+    if (out.fragment.empty() && root.get("content").isStr())
+      out.fragment = hardenFragmentSource(cleanGeneratedSource(root.get("content").asStr()));
     if (out.fragment.empty()) throw std::runtime_error("provider returned no fragment source");
     std::printf("[SHADER-AI][TRACE] Generate #%d GLSL EXTRACTION RESULT: SUCCESS extracted=%zu bytes hash=%s\n",
                 generationId, out.fragment.size(), textSignatureString(out.fragment).c_str());
@@ -544,7 +582,7 @@ GeneratedShader parseRemote(const std::string& body, ShaderKind kind, int genera
         source.find("void mainImage") != std::string::npos) {
       GeneratedShader out;
       out.kind = kind;
-      out.fragment = cleanGeneratedSource(source);
+      out.fragment = hardenFragmentSource(cleanGeneratedSource(source));
       if (out.fragment.empty()) throw std::runtime_error("provider returned no extractable GLSL source");
       std::printf("[SHADER-AI][TRACE] Generate #%d GLSL EXTRACTION RESULT: SUCCESS (direct GLSL) extracted=%zu bytes hash=%s\n",
                   generationId, out.fragment.size(), textSignatureString(out.fragment).c_str());

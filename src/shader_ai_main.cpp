@@ -450,6 +450,95 @@ public:
     editClock_ = nowSeconds();
   }
 
+  /** Render the just-compiled program to a tiny target and read the pixels
+   *  back. Returns true when the output is (nearly) one uniform color at
+   *  several instants - i.e. the shader never uses the pixel position, the
+   *  "flashing solid colors" degenerate case. Sample times avoid t=0 so a
+   *  spatial term multiplied by sin(uTime) is not misread as flat. */
+  bool checkFlatOutput() {
+    if (!validProgram_ || !fsTriangle_) return false;
+    const int W = 64, H = 64;
+    if (flatFbo_.w != W || flatFbo_.h != H) {
+      flatFbo_ = FrameTarget::color(W, H, ::gl::RGBA8, ::gl::RGBA, ::gl::UNSIGNED_BYTE,
+                                    {::gl::LINEAR, ::gl::LINEAR, ::gl::CLAMP_TO_EDGE, false});
+    }
+    const float bpm = 128.0f;
+    auto renderAt = [&](float t, std::vector<unsigned char>& out) {
+      flatFbo_.bind();
+      ::glDisable(::gl::BLEND); ::glDisable(::gl::DEPTH_TEST);
+      ::glClearColor(0.002f, 0.004f, 0.012f, 1.0f);
+      ::glClear(::gl::COLOR_BUFFER_BIT);
+      validProgram_->use();
+      validProgram_->set2f("uResolution", (float)W, (float)H);
+      const float beat = t * bpm / 60.0f;
+      const float bar = beat / 4.0f;
+      const float phase = beat - std::floor(beat);
+      auto set = [&](const char* n, float v) { validProgram_->set1f(n, v); };
+      set("uTime", t); set("uBPM", bpm); set("uBeat", beat); set("uBar", bar); set("uBeatPhase", phase);
+      set("uAudioLevel", 0.1f); set("uBass", 0.1f); set("uMid", 0.1f); set("uTreble", 0.1f);
+      set("uKick", 0.05f); set("uSnare", 0.05f);
+      validProgram_->set4f("uColor", 0.0f, 0.85f, 1.0f, 1.0f);
+      validProgram_->set4f("uColor2", 0.8f, 0.05f, 0.75f, 1.0f);
+      set("uIntensity", 1.0f); set("uSpeed", 1.0f); set("uScale", 1.0f);
+      validProgram_->set1f("uTimeDelta", 0.016f);
+      validProgram_->set1i("uFrame", 1);
+      validProgram_->set4f("uMouse", 0.0f, 0.0f, 0.0f, 0.0f);
+      validProgram_->set4f("uDate", 2026.0f, 8.0f, 10.0f, 0.0f);
+      validProgram_->set4f("uChannelTime", t, t, t, t);
+      for (int ci = 0; ci < 4; ++ci) {
+        char n[40]; std::snprintf(n, sizeof(n), "uChannelResolution[%d]", ci);
+        validProgram_->set4f(n, (float)W, (float)H, 1.0f, 1.0f);
+      }
+      for (const ShaderParamDecl& p : params_) {
+        const char* n = p.name.c_str();
+        if (p.type == ShaderParamType::Float || p.type == ShaderParamType::Int || p.type == ShaderParamType::Bool)
+          set(n, p.value);
+        else if (p.type == ShaderParamType::Color)
+          validProgram_->set4f(n, p.vector[0], p.vector[1], p.vector[2], p.vector[3]);
+        else if (p.type == ShaderParamType::Vec2)
+          validProgram_->set2f(n, p.vector[0], p.vector[1]);
+        else if (p.type == ShaderParamType::Vec3)
+          validProgram_->set3f(n, p.vector[0], p.vector[1], p.vector[2]);
+        else if (p.type == ShaderParamType::Vec4)
+          validProgram_->set4f(n, p.vector[0], p.vector[1], p.vector[2], p.vector[3]);
+      }
+      // bind samplers exactly like renderPreview so a channel-only shader is
+      // not misread as flat because its texture unit is unbound
+      ensureDefaultChannelTexture();
+      for (int ci = 0; ci < 4; ++ci) {
+        if (!channelUsed_[(size_t)ci]) continue;
+        char n[32]; std::snprintf(n, sizeof(n), "uChannel%d", ci);
+        const int loc = ::glGetUniformLocation(validProgram_->id(), n);
+        if (loc < 0) continue;
+        const Texture& tex = channelTex_[(size_t)ci].tex ? channelTex_[(size_t)ci] : defaultChannelTex_;
+        ::glUniform1i(loc, ci);
+        tex.bind(ci);
+      }
+      ::glActiveTexture(::gl::TEXTURE0);
+      fsTriangle_->draw(3);
+      // read back while the offscreen target is still bound - reading after
+      // unbinding would sample the window's back buffer instead
+      ::glReadPixels(0, 0, W, H, ::gl::RGBA, ::gl::UNSIGNED_BYTE, out.data());
+      ::glBindFramebuffer(::gl::FRAMEBUFFER, 0);
+    };
+    const int kFlatDelta = 8;  // max channel delta (of 255) that still counts as solid
+    std::vector<unsigned char> px((size_t)W * H * 4);
+    for (const float t : {0.37f, 1.13f}) {
+      renderAt(t, px);
+      unsigned char lo[3] = {255, 255, 255}, hi[3] = {0, 0, 0};
+      for (size_t i = 0; i < px.size(); i += 4) {
+        for (int c = 0; c < 3; ++c) {
+          const unsigned char v = px[i + (size_t)c];
+          if (v < lo[c]) lo[c] = v;
+          if (v > hi[c]) hi[c] = v;
+        }
+      }
+      const int maxDelta = std::max({(int)hi[0] - lo[0], (int)hi[1] - lo[1], (int)hi[2] - lo[2]});
+      if (maxDelta > kFlatDelta) return false;  // spatial variation found at this instant
+    }
+    return true;  // uniform color at every sampled instant
+  }
+
   bool compileNow() {
     traceSource("source immediately before preview compilation", fragment_);
     std::printf("[SHADER-AI][TRACE] Generate #%d compiler input hash=%s\n",
@@ -476,12 +565,25 @@ public:
       validVertex_ = vertex_;
       lastCompiled_ = fragment_;
       channelUsed_ = usedSamplerChannels(validFragment_);
-      diagnostics_.clear();
-      status_ = "Compiled successfully - previous valid preview replaced";
       sourceDirty_ = false;
       compileQueued_ = false;
       invalidatePreview();
       previewTime_ = 0.0f;
+      // A shader that compiles is not necessarily a shader that shows
+      // anything: catch time-only outputs that render as one flashing solid
+      // color and surface them instead of accepting them silently.
+      flatOutput_ = checkFlatOutput();
+      if (flatOutput_) {
+        diagnostics_ = "Preview check: this shader renders as one uniform solid color (every pixel "
+                       "identical) - it never uses the pixel position. Add spatial variation, e.g. "
+                       "declare `in vec2 vUV;` and use it, or compute `vec2 uv = gl_FragCoord.xy / "
+                       "uResolution;`, and make the output depend on `uv` (not only on uTime).";
+        status_ = "Compiled successfully - warning: renders as a uniform color (no per-pixel "
+                  "variation) - edit the source or Ask AI to Fix";
+      } else {
+        diagnostics_.clear();
+        status_ = "Compiled successfully - previous valid preview replaced";
+      }
       std::printf("[SHADER-AI][TRACE] Generate #%d compile: SUCCESS program=%u previous=%u preview-program: REPLACED\n",
                   generationSerial_, validProgram_->id(), previousProgram);
       std::fflush(stdout);
@@ -589,6 +691,8 @@ public:
       if (compileNow()) {
         conversation_ = explanation_;
         status_ = "Applied generated shader (request #" + std::to_string(generationSerial_) + ")";
+        if (flatOutput_)
+          status_ += " - warning: renders as a uniform color - Ask AI to Fix or edit the source";
       }
     } catch (const std::exception& e) {
       std::printf("[SHADER-AI][TRACE] Generate #%d RESULT FAILED: %s", generationSerial_, e.what());
@@ -1257,7 +1361,11 @@ public:
     ImGui::BeginChild("ai_bottom", ImVec2(0, 190), true);
     ImGui::BeginTabBar("ai_tabs");
     if (ImGui::BeginTabItem("Diagnostics")) {
-      ImGui::TextColored(diagnostics_.empty() ? ImVec4(0.3f, 1, 0.7f, 1) : ImVec4(1, 0.3f, 0.3f, 1), "%s", status_.c_str());
+      // green = clean, amber = compiles but renders as a uniform color, red = compile error
+      const ImVec4 statusCol = diagnostics_.empty() ? ImVec4(0.3f, 1, 0.7f, 1)
+                               : flatOutput_ ? ImVec4(1.0f, 0.85f, 0.3f, 1)
+                               : ImVec4(1, 0.3f, 0.3f, 1);
+      ImGui::TextColored(statusCol, "%s", status_.c_str());
       if (!diagnostics_.empty()) {
         ImGui::TextWrapped("%s", diagnostics_.c_str());
         if (ImGui::Button("Ask AI to Fix")) generate(true);
@@ -1643,6 +1751,26 @@ public:
       std::printf("[SHADER-AI] smoke: deterministic green preview FAIL (%u,%u,%u,%u)\n",
                   greenPixel[0], greenPixel[1], greenPixel[2], greenPixel[3]);
       return 22;
+    }
+
+    // Flat-output detection: a shader that never uses the pixel position must
+    // be flagged (and made repairable), while a spatial shader must not be.
+    GeneratedShader flat;
+    flat.kind = ShaderKind::Fragment;
+    flat.fragment = "#version 300 es\nout vec4 fragColor;\nuniform float uTime;\nvoid main() { fragColor = vec4(fract(uTime), 0.5, 0.5, 1.0); }\n";
+    applyGenerated(flat, "Deterministic Flat");
+    if (!compileNow() || !flatOutput_ || diagnostics_.empty()) {
+      std::printf("[SHADER-AI] smoke: flat-output detection FAIL (flagged=%d diagnostics=%zu)\n",
+                  (int)flatOutput_, diagnostics_.size());
+      return 24;
+    }
+    GeneratedShader spatial;
+    spatial.kind = ShaderKind::Fragment;
+    spatial.fragment = "#version 300 es\nin vec2 vUV;\nout vec4 fragColor;\nvoid main() { fragColor = vec4(vUV.x, 0.5, 0.5, 1.0); }\n";
+    applyGenerated(spatial, "Deterministic Spatial");
+    if (!compileNow() || flatOutput_ || !diagnostics_.empty()) {
+      std::printf("[SHADER-AI] smoke: spatial shader falsely flagged flat (flat=%d)\n", (int)flatOutput_);
+      return 25;
     }
 
     applyGenerated(g, "Smoke Pair Restore");
@@ -2092,6 +2220,12 @@ private:
   GLFWwindow* window_ = nullptr;
   std::string shaderDir_, dataDir_, settingsPath_;
   FrameTarget preview_;
+  // tiny offscreen target used to detect degenerate "solid color" shaders:
+  // the compiled program is rendered and read back; if every pixel matches at
+  // several instants, the shader never uses the pixel position and the user
+  // (and the repair prompt) are told so instead of silently flashing colors.
+  FrameTarget flatFbo_;
+  bool flatOutput_ = false;
   std::unique_ptr<Mesh> fsTriangle_;
   std::unique_ptr<Shader> validProgram_;
   std::unique_ptr<ShaderAiProvider> provider_;

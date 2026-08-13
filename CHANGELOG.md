@@ -31,6 +31,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **AI Shader Generator flat outputs** — remote generations that ignored the pixel position (time-only colors like `fragColor = vec4(fract(uTime), …)`) previously compiled and rendered as a flashing solid screen with no warning. The provider prompt now requires per-pixel coordinates (`in vec2 vUV` or `gl_FragCoord.xy / uResolution`) and forbids uniform time-only output; extracted sources are hardened (explicit `#version 300 es`, `gl_FragColor` → `out vec4 fragColor`, output declaration injected) so they can never silently compile as legacy GLSL; and every successful compile is rendered to a 64×64 target and read back at two instants — a shader whose pixels are all identical is flagged with an amber warning and a repair note instead of being accepted silently (the note also enables "Ask AI to Fix", which previously required a compile error). Covered by new smoke assertions.
 - Editor scrub preview lagged one frame (UI input is processed after the engine renders) — a queued seek now triggers an explicit same-frame refresh (`refreshSeekPreview`).
 - A failed audio track load previously cleared the currently playing track; the old source is now retained and playback state (paused or running) is preserved across swaps.
 
