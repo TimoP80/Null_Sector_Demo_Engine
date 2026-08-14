@@ -255,7 +255,19 @@ EditorPackageResult packageEditorProject(const std::string& projectRoot,
   }
 
   const fs::path executable = fs::path(executablePath);
-  if (executable.empty() || !fs::is_regular_file(executable, ec)) {
+  if (executable.empty()) {
+    result.message =
+        "engine executable not found: ns_demo"
+#ifdef _WIN32
+        ".exe"
+#else
+        ""
+#endif
+        " must sit next to the editor binary (the package ships the "
+        "runtime-only player, not the editor)";
+    return result;
+  }
+  if (!fs::is_regular_file(executable, ec)) {
     result.message = "engine executable not found: " + executablePath;
     return result;
   }

@@ -5225,19 +5225,35 @@ void DemoEditor::newProjectDialog() {
 
 namespace {
 
-std::string editorExecutablePath() {
+// The distribution ZIP must ship the runtime-only engine player (ns_demo),
+// never the editor build itself: the editor exe forces --editor and carries
+// the full authoring layer. CMake always builds ns_demo and ns_editor into
+// the same output directory, so the player is a sibling of the running
+// editor exe. Returns empty when no sibling player is present.
+std::string enginePlayerExecutablePath() {
+  std::error_code ec;
+  std::filesystem::path dir;
 #ifdef _WIN32
   wchar_t path[32768] = {};
   const DWORD n = GetModuleFileNameW(nullptr, path,
                                      (DWORD)(sizeof(path) / sizeof(path[0])));
-  if (n > 0 && n < sizeof(path) / sizeof(path[0]))
-    return std::filesystem::path(std::wstring(path, n)).string();
-  return std::string();
+  if (n <= 0 || n >= sizeof(path) / sizeof(path[0])) return std::string();
+  dir = std::filesystem::path(std::wstring(path, n)).parent_path();
 #else
-  std::error_code ec;
-  const std::filesystem::path p = std::filesystem::absolute("ns_demo", ec);
-  return ec ? std::string() : p.string();
+  dir = std::filesystem::current_path(ec);
+  if (ec) return std::string();
 #endif
+  const std::filesystem::path candidate =
+      dir / (std::string("ns_demo") +
+#ifdef _WIN32
+             ".exe"
+#else
+             ""
+#endif
+  );
+  if (std::filesystem::is_regular_file(candidate, ec))
+    return std::filesystem::absolute(candidate, ec).string();
+  return std::string();
 }
 
 }  // namespace
@@ -5293,7 +5309,7 @@ void DemoEditor::startPackage(const std::string& outputZip) {
   const std::filesystem::path root = data.parent_path();
   const std::string track =
       w_.audio && w_.audio->trackMode ? w_.audio->trackPath() : std::string();
-  const std::string exe = editorExecutablePath();
+  const std::string exe = enginePlayerExecutablePath();
   const EditorPackageResult r = packageEditorProject(
       root.string(), w_.app->scriptPath(), track, exe, finalOutput);
   packageOk_ = r.ok;
